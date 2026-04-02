@@ -731,19 +731,20 @@
                 })
             });
 
-            const data = await res.json();
             stopLoading();
 
             if (!res.ok) {
-                showError(data.detail || 'Execution failed');
+                const errText = await res.text();
+                showError(`Backend Error (${res.status}): ${errText}`);
                 return;
             }
 
+            const data = await res.json();
             renderResults(data);
 
         } catch (err) {
             stopLoading();
-            showError("Network error: Could not reach backend.");
+            showError(`Network error or timeout: ${err.message}`);
         }
     });
 
