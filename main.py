@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -82,6 +83,12 @@ class ExecuteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect to the interactive API documentation."""
+    return RedirectResponse(url="/docs")
 
 
 @app.post("/v1/execute", response_model=ExecuteResponse)
