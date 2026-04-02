@@ -126,14 +126,13 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> str:
         with DDGS(timeout=3) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         if not results:
-            return f"Realtime search proxy offline. Please use your internal Llama-3 knowledge base to supply information for: {query}"
+            return "[DuckDuckGo returned no results]"
         lines = []
         for r in results:
             lines.append(f"- **{r.get('title', '')}**: {r.get('body', '')} ({r.get('href', '')})")
         return "\n".join(lines)
     except Exception as e:
-        # Failsafe for Render DDG IP bans: tell Llama to use internal knowledge instead of breaking.
-        return f"Realtime search blocked by cloud firewall. Please use your extensive internal knowledge base to supply context for this query: {query}"
+        return f"[DuckDuckGo search failed: {e}]"
 
 
 def _wikipedia_search(query: str) -> str:
@@ -151,9 +150,9 @@ def _wikipedia_search(query: str) -> str:
                 summaries.append(f"### {title}\n{summary}")
             except (wikipedia.DisambiguationError, wikipedia.PageError):
                 continue
-        return "\n\n".join(summaries) if summaries else f"Wikipedia proxy empty. Please rely on your internal knowledge base to discuss: {query}"
+        return "\n\n".join(summaries) if summaries else "[Wikipedia: no usable pages found]"
     except Exception as e:
-        return f"Wikipedia blocked by cloud firewall. Please rely on your internal knowledge base to discuss: {query}"
+        return f"[Wikipedia search failed: {e}]"
 
 
 def _arxiv_search(query: str, max_results: int = 3) -> str:
@@ -165,13 +164,13 @@ def _arxiv_search(query: str, max_results: int = 3) -> str:
         search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.Relevance)
         results = list(client.results(search))
         if not results:
-            return f"Arxiv proxy empty. Please rely on your internal knowledge base to discuss: {query}"
+            return "[ArXiv returned no results]"
         lines = []
         for paper in results:
             lines.append(f"- **{paper.title}** ({paper.published.year}): {paper.summary[:400]}...")
         return "\n".join(lines)
     except Exception as e:
-        return f"Arxiv blocked by cloud firewall. Please rely on your internal knowledge base to discuss: {query}"
+        return f"[ArXiv search failed: {e}]"
 
 
 # ---------------------------------------------------------------------------
@@ -271,16 +270,23 @@ def _run_music_researcher(state: GraphState) -> dict:
     tool_outputs = []
 
     ddg_result = _duckduckgo_search(f"{query} music genre mood style")
-    tools_called.append("duckduckgo_search")
-    tool_outputs.append(ddg_result)
-
-    # If DDG failed, fall back to Wikipedia
-    if "no results" in ddg_result.lower() or "failed" in ddg_result.lower():
-        wiki_result = _wikipedia_search(f"{query} music genre")
-        tools_called.append("wikipedia_search")
-        tool_outputs.append(wiki_result)
+    
+    # Pure handling: If DuckDuckGo genuinely succeeded, use it.
+    if "[DuckDuckGo search failed" not in ddg_result and "[DuckDuckGo returned no results]" not in ddg_result:
+        tools_called.append("duckduckgo_search")
+        tool_outputs.append(ddg_result)
+        tool_context = f"Internet Search Results:\n{ddg_result}"
     else:
-        wiki_result = ""
+        # DDG was blocked or found nothing. Fallback purely to Wikipedia.
+        wiki_result = _wikipedia_search(f"{query} music genre")
+        if "[Wikipedia search failed" not in wiki_result and "[Wikipedia: no usable pages found]" not in wiki_result:
+            tools_called.append("wikipedia_search")
+            tool_outputs.append(wiki_result)
+            tool_context = f"Wikipedia Context:\n{wiki_result}"
+        else:
+            # Both tools legitimately failed to find data.
+            tools_called.append("internal_knowledge")
+            tool_context = "No external internet context could be found for this specific query. Please generate the music brief strictly using your internal Llama-3 training data."
 
     system_prompt = """You are a Music Research specialist. Given a music query, research and return:
 
@@ -303,9 +309,7 @@ FAILURE BEHAVIOR:
 Return your findings as structured text with clear section headers.
 Do not pad your response — if you found what you need, stop."""
 
-    tool_context = f"DuckDuckGo results:\n{ddg_result}"
-    if wiki_result:
-        tool_context += f"\n\nWikipedia results:\n{wiki_result}"
+
 
     user_msg = f"Query: {query}\n\nTool research results:\n{tool_context}"
     if state.get("contradiction_detected"):
@@ -350,15 +354,27 @@ def _run_trend_analyst(state: GraphState) -> dict:
     tools_called = []
     tool_outputs = []
 
+    tool_context_parts = []
+    
     # ArXiv for AI music generation research
     arxiv_result = _arxiv_search(f"AI music generation {query}")
-    tools_called.append("arxiv_search")
-    tool_outputs.append(arxiv_result)
+    if "[ArXiv search failed" not in arxiv_result and "[ArXiv returned no results]" not in arxiv_result:
+        tools_called.append("arxiv_search")
+        tool_outputs.append(arxiv_result)
+        tool_context_parts.append(f"ArXiv research:\n{arxiv_result}")
 
     # DuckDuckGo for technical parameters
     ddg_result = _duckduckgo_search(f"{query} BPM tempo key instrumentation music production")
-    tools_called.append("duckduckgo_search")
-    tool_outputs.append(ddg_result)
+    if "[DuckDuckGo search failed" not in ddg_result and "[DuckDuckGo returned no results]" not in ddg_result:
+        tools_called.append("duckduckgo_search")
+        tool_outputs.append(ddg_result)
+        tool_context_parts.append(f"DuckDuckGo research:\n{ddg_result}")
+        
+    if not tool_context_parts:
+        tools_called.append("internal_knowledge")
+        tool_context = "No external internet context could be found. Please generate the technical parameters strictly using your internal Llama-3 training data."
+    else:
+        tool_context = "\n\n".join(tool_context_parts)
 
     system_prompt = """You are an AI Music Trend Analyst. Given a music query (and any prior research 
 context), return technical parameters and current market intelligence.
@@ -385,7 +401,6 @@ FAILURE BEHAVIOR:
 Return structured text with clear section headers.
 Do not repeat information already gathered by music_researcher."""
 
-    tool_context = f"ArXiv results:\n{arxiv_result}\n\nDuckDuckGo results:\n{ddg_result}"
     prior = f"\n\nPrior research context:\n{prior_research[:1500]}" if prior_research else ""
 
     user_msg = f"Query: {query}{prior}\n\nTool research results:\n{tool_context}"
