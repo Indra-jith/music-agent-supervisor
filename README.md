@@ -1,9 +1,6 @@
 # Music Agent Supervisor
 
 A **non-deterministic, multi-agent AI system** that generates structured, technically accurate Music Generation Briefs from natural language queries. Powered by **FastAPI** and **LangGraph**, a Supervisor node reasons about state gaps in real time and dynamically routes between three specialist agents — no hardcoded pipeline, no fixed sequence.
-
-> *"futuristic luxury EV brand ad"* → structured JSON brief with BPM range, key, instrumentation, mood tags, reference tracks, and confidence score. In seconds.
-
 ---
 
 ## Live Demo
