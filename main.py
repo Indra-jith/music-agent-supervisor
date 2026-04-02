@@ -92,7 +92,7 @@ async def root():
 
 
 @app.post("/v1/execute", response_model=ExecuteResponse)
-async def execute(request: ExecuteRequest):
+def execute(request: ExecuteRequest):
     """Run a music generation query through the supervisor pipeline.
 
     The supervisor dynamically decides which agents to call based on
