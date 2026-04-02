@@ -122,8 +122,6 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
 def _duckduckgo_search(query: str, max_results: int = 5) -> str:
     """Search DuckDuckGo. Returns formatted results or error message."""
     try:
-        import time
-        time.sleep(1)
         from duckduckgo_search import DDGS
         with DDGS(timeout=10) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -148,8 +146,8 @@ def _wikipedia_search(query: str) -> str:
         summaries = []
         for title in results[:2]:
             try:
-                page = wikipedia.page(title, auto_suggest=False)
-                summaries.append(f"### {page.title}\n{page.summary[:1500]}")
+                summary = wikipedia.summary(title, sentences=5, auto_suggest=False)
+                summaries.append(f"### {title}\n{summary}")
             except (wikipedia.DisambiguationError, wikipedia.PageError):
                 continue
         return "\n\n".join(summaries) if summaries else "[Wikipedia: no usable pages found]"
