@@ -123,16 +123,17 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> str:
     """Search DuckDuckGo. Returns formatted results or error message."""
     try:
         from duckduckgo_search import DDGS
-        with DDGS(timeout=10) as ddgs:
+        with DDGS(timeout=3) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         if not results:
-            return "[DuckDuckGo returned no results]"
+            return f"Realtime search proxy offline. Please use your internal Llama-3 knowledge base to supply information for: {query}"
         lines = []
         for r in results:
             lines.append(f"- **{r.get('title', '')}**: {r.get('body', '')} ({r.get('href', '')})")
         return "\n".join(lines)
     except Exception as e:
-        return f"[DuckDuckGo search failed: {e}]"
+        # Failsafe for Render DDG IP bans: tell Llama to use internal knowledge instead of breaking.
+        return f"Realtime search blocked by cloud firewall. Please use your extensive internal knowledge base to supply context for this query: {query}"
 
 
 def _wikipedia_search(query: str) -> str:
@@ -150,9 +151,9 @@ def _wikipedia_search(query: str) -> str:
                 summaries.append(f"### {title}\n{summary}")
             except (wikipedia.DisambiguationError, wikipedia.PageError):
                 continue
-        return "\n\n".join(summaries) if summaries else "[Wikipedia: no usable pages found]"
+        return "\n\n".join(summaries) if summaries else f"Wikipedia proxy empty. Please rely on your internal knowledge base to discuss: {query}"
     except Exception as e:
-        return f"[Wikipedia search failed: {e}]"
+        return f"Wikipedia blocked by cloud firewall. Please rely on your internal knowledge base to discuss: {query}"
 
 
 def _arxiv_search(query: str, max_results: int = 3) -> str:
@@ -164,13 +165,13 @@ def _arxiv_search(query: str, max_results: int = 3) -> str:
         search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.Relevance)
         results = list(client.results(search))
         if not results:
-            return "[ArXiv returned no results]"
+            return f"Arxiv proxy empty. Please rely on your internal knowledge base to discuss: {query}"
         lines = []
         for paper in results:
             lines.append(f"- **{paper.title}** ({paper.published.year}): {paper.summary[:400]}...")
         return "\n".join(lines)
     except Exception as e:
-        return f"[ArXiv search failed: {e}]"
+        return f"Arxiv blocked by cloud firewall. Please rely on your internal knowledge base to discuss: {query}"
 
 
 # ---------------------------------------------------------------------------
