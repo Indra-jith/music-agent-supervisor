@@ -171,10 +171,10 @@ cd music-agent-supervisor
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
+Create a `.env` file in the root directory:
 ```
 GROQ_API_KEY=your_key_here
-PERSIST_TRACES=true
+# PERSIST_TRACES=true (Default is strictly true for logging)
 ```
 
 Start the server:
@@ -184,12 +184,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Open [http://localhost:8000/docs](http://localhost:8000/docs) to explore the API interactively.
 
-To enable file-based trace persistence (survives restarts):
-```
-PERSIST_TRACES=true
-```
-
-Traces are written to `/traces/{session_id}.json` after every agent call.
+> **Note on Telemetry:** File-based trace persistence is enabled by default to ensure all agent latencies and decisions are logged.
+> Traces are immediately written to `/traces/{session_id}.json` after every single agent node call.
 
 ---
 

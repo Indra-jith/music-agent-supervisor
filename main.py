@@ -92,19 +92,23 @@ async def root():
 
 
 @app.post("/v1/execute", response_model=ExecuteResponse)
-def execute(request: ExecuteRequest):
+async def execute(request: ExecuteRequest):
     """Run a music generation query through the supervisor pipeline.
 
     The supervisor dynamically decides which agents to call based on
     what information is needed — not a fixed sequence.
     """
     try:
-        result = execute_query(
-            query=request.query,
-            session_id=request.session_id,
-            max_iterations=request.max_iterations or 10,
-            token_budget=request.token_budget or 5000,
-        )
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor() as pool:
+            result = await loop.run_in_executor(
+                pool,
+                execute_query,
+                request.query,
+                request.session_id,
+                request.max_iterations or 10,
+                request.token_budget or 5000,
+            )
         return ExecuteResponse(
             session_id=result["session_id"],
             final_answer=result["final_answer"],

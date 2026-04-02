@@ -90,21 +90,29 @@ No autonomous system is perfect. Here's what occurs at the edges of Wubble's cap
 
 ---
 
-## 4. Production Roadmap
+## 4. Lessons Learned & Production Engineering Upgrades
+
+During the technical review and stress tests, several architectural changes were mandated to elevate the system from a "student-level demo" to a production-ready system:
+
+1. **Synchronous Blocking in FastAPI:** The original `/v1/execute` endpoint was implemented synchronously (`def execute(...)`), which completely blocked the event loop. Under concurrent load, a single long LLM inference would freeze the entire web server. This was refactored to `async def execute(...)` utilizing `run_in_executor` to offload the LangGraph execution to a thread pool cache, enabling true concurrency.
+2. **Missing Observability (Latency Metrics):** Originally, tools and agents lacked granular timing. By injecting `time.time()` tracking directly into the trace dumps (`latency_ms`), the system can now ship its own metric telemetry, allowing us to pinpoint which external tool searches (e.g. Wikipedia vs DuckDuckGo) create the heaviest bottlenecks.
+3. **Pure Function Node Architecture:** Early versions of the code mutated the `GraphState` directly in place (`state["iteration"] += 1`). The LangGraph state management paradigm expects node handlers to return dictionary updates, which are then applied by Graph reducers. Although Python's reference semantics allow in-place mutations, returning dict-updates forces pure-function determinism and cleans up debugging.
+4. **Resilient Tool-Calling loops:** Relying on a single `llm.invoke` for tools often resulted in crashes if an API rate-limit was hit. We implemented a ReAct-style `_run_agent_loop` with a nested `_invoke_with_retry` mechanism, utilizing exponential backoff specifically targeting 429 and 503 transient errors, ensuring queries survive cloud-provider throttling.
+
+---
+
+## 5. Production Roadmap
 
 Moving from Alpha to General Availability will require the following implementations:
 
 1. **WebSocket Frontend Client**
-
-   * **Implementation:** Developing a Next.js real-time web UI that connects to `ws://localhost:8000/ws/execute`. Utilizing Framer Motion and React context to decode the `event_callback` stream.
+   * **Implementation:** Developing a minimal, developer-focused `index.html` UI that connects to `ws://localhost:8000/ws/execute`.
    * **Value:** Users will see beautiful micro-animations as each agent "starts" and "finishes", observing the internal reasoning JSON fly by in a hacker-esque terminal display rather than dealing with HTTP 504 timeouts on long LLM runs.
 
 2. **Vector Store Pre-Caching (Pinecone/Redis)**
-
    * **Implementation:** Implementing a semantic interceptor layer in front of the LangGraph runtime. Standardized incoming queries are mapped using `text-embedding-3-small`.
    * **Value:** If a `similarity_score > 0.95` is hit against previously generated high-quality briefs (e.g. "lo-fi study beats"), the supervisor graph is bypassed entirely and the cached brief is yielded instantly, creating a 99% cost reduction and zero-latency response for common queries.
 
 3. **MusicGen / Suno Pipeline Integration**
-
    * **Implementation:** Setting up an asyncio celery queue worker that watches for the `FINISH` state payload containing the JSON brief. The queue intercepts the JSON array strings, concatenates them into a raw prompt, and hits the Suno/Udio generation API via webhooks.
    * **Value:** The final JSON brief currently acts as the end-state text. Piping these parameters directly into an audio model unlocks the true capability of the system, transforming text queries dynamically into immediately playable `.wav` files.

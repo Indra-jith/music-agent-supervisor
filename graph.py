@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 import tiktoken
 from dotenv import load_dotenv
@@ -42,6 +42,9 @@ MAX_RETRIES_PER_AGENT = 3  # initial + retry + debate
 # Token counting helper
 # ---------------------------------------------------------------------------
 
+# NOTE: cl100k_base is an OpenAI encoding. Llama-3.3 uses a different tokenizer.
+# We use cl100k_base as a close-enough proxy (~±15%) for cost estimation.
+# For production, use the actual Llama tokenizer.
 _ENC = tiktoken.get_encoding("cl100k_base")
 
 
@@ -53,8 +56,6 @@ def _count_tokens(text: str) -> int:
 # State schema
 # ---------------------------------------------------------------------------
 
-
-from typing import TypedDict, Any, Optional
 
 class GraphState(TypedDict, total=False):
     query: str
@@ -211,9 +212,14 @@ def _run_agent_loop(
     system_prompt: str,
     user_message: str,
     max_tool_calls: int = 6,
+    max_retries: int = 2,
 ) -> tuple[str, list[dict]]:
     """
-    Run a tool-calling agent loop.
+    Run a tool-calling agent loop with retry logic for LLM failures.
+ 
+    Args:
+        max_retries: Number of times to retry on LLM invocation failure
+                     (rate-limits, timeouts, transient errors).
  
     Returns:
         (final_text_output, list_of_tool_calls_made)
@@ -229,8 +235,25 @@ def _run_agent_loop(
     tools_called_log = []
     call_count = 0
  
+    def _invoke_with_retry(msgs):
+        """Invoke the LLM with exponential backoff on transient failures."""
+        for attempt in range(max_retries + 1):
+            try:
+                return llm_with_tools.invoke(msgs)
+            except Exception as e:
+                err_str = str(e).lower()
+                is_transient = any(k in err_str for k in [
+                    "rate_limit", "rate limit", "429", "timeout",
+                    "connection", "503", "502", "overloaded",
+                ])
+                if is_transient and attempt < max_retries:
+                    wait = 2 ** attempt  # 1s, 2s
+                    time.sleep(wait)
+                    continue
+                raise  # Non-transient or exhausted retries
+ 
     while call_count < max_tool_calls:
-        response = llm_with_tools.invoke(messages)
+        response = _invoke_with_retry(messages)
         messages.append(response)  # append AIMessage to history
  
         # If the LLM made no tool calls, it's done — return its text
@@ -273,7 +296,7 @@ def _run_agent_loop(
         HumanMessage(content="You have used the maximum number of tool calls. "
                              "Synthesise your findings now and produce your final output.")
     )
-    final = llm_with_tools.invoke(messages)
+    final = _invoke_with_retry(messages)
     return final.content, tools_called_log
 
 
@@ -282,7 +305,7 @@ def _run_agent_loop(
 # ---------------------------------------------------------------------------
 
 
-PERSIST_TRACES = os.environ.get("PERSIST_TRACES", "false") == "true"
+PERSIST_TRACES = os.environ.get("PERSIST_TRACES", "true").lower() != "false"
 
 def _persist_trace(session_id: str, trace_entry: dict) -> None:
     """Append a trace entry to the session's JSON file on disk."""
@@ -367,8 +390,6 @@ def _assess_quality(output: str) -> str:
 def _run_music_researcher(state) -> dict:
     """Music Researcher: autonomously searches for genre, mood, cultural
     context, and reference tracks using bound tools."""
-    from graph import _get_llm, _count_tokens, _assess_quality, _persist_trace
- 
     query = state["query"]
     llm   = _get_llm(temperature=0.4)
  
@@ -404,6 +425,7 @@ RULES:
  
     # Count input tokens (approximate — full message history not known upfront)
     input_tokens = _count_tokens(system_prompt + user_message)
+    t0 = time.time()
  
     output_text, tools_called_log = _run_agent_loop(
         llm=llm,
@@ -413,6 +435,7 @@ RULES:
         max_tool_calls=4,
     )
  
+    latency_ms = int((time.time() - t0) * 1000)
     output_tokens = _count_tokens(output_text)
     quality = _assess_quality(output_text)
  
@@ -423,6 +446,7 @@ RULES:
         "step": len(state["execution_trace"]) + 1,
         "agent": "music_researcher",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "latency_ms": latency_ms,
         "input_summary": f"Research genre/mood/cultural context for: {query}",
         "tools_called": tool_names,
         "tool_outputs": tool_output_previews,
@@ -444,8 +468,6 @@ RULES:
 def _run_trend_analyst(state) -> dict:
     """Trend Analyst: autonomously searches for BPM, key, instrumentation,
     and AI music generation trends using bound tools."""
-    from graph import _get_llm, _count_tokens, _assess_quality, _persist_trace
- 
     query        = state["query"]
     prior_research = state.get("researcher_output", "")
     llm          = _get_llm(temperature=0.3)
@@ -489,6 +511,7 @@ RULES:
         )
  
     input_tokens = _count_tokens(system_prompt + user_message)
+    t0 = time.time()
  
     output_text, tools_called_log = _run_agent_loop(
         llm=llm,
@@ -498,6 +521,7 @@ RULES:
         max_tool_calls=4,
     )
  
+    latency_ms = int((time.time() - t0) * 1000)
     output_tokens = _count_tokens(output_text)
     quality = _assess_quality(output_text)
  
@@ -508,6 +532,7 @@ RULES:
         "step": len(state["execution_trace"]) + 1,
         "agent": "trend_analyst",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "latency_ms": latency_ms,
         "input_summary": f"Find technical parameters (BPM/key/instrumentation) for: {query}",
         "tools_called": tool_names,
         "tool_outputs": tool_output_previews,
@@ -529,9 +554,6 @@ RULES:
 def _run_prompt_strategist(state) -> dict:
     """Prompt Strategist: autonomously synthesises research into a validated
     JSON brief, using the validate_json tool to check its own output."""
-    from graph import _get_llm, _count_tokens, _persist_trace
-    import json
- 
     query          = state["query"]
     researcher_out = state.get("researcher_output", "")
     analyst_out    = state.get("analyst_output", "")
@@ -569,6 +591,13 @@ CONTRADICTION RULE:
   Instead output exactly: {"contradiction": "clear explanation of the conflict"}
   Do NOT call validate_json in this case.
  
+CONSTRAINT EXTRACTION:
+   If the original query contains explicit constraints (e.g. "no lyrics",
+   "no vocals", "under 2 minutes", "avoid piano"), you MUST capture them:
+   - "no lyrics/vocals" -> set generation_notes to include "instrumental only"
+   - "avoid X" -> add to generation_notes
+   - Duration constraints -> set duration_seconds accordingly
+
 RULES:
   - confidence_score: 0.9+ = nearly all fields sourced. Below 0.5 = flag.
   - Never fabricate reference_tracks. Use [] if none were found.
@@ -590,6 +619,7 @@ RULES:
     user_message = "\n\n".join(context_parts) + "\n\nProduce the validated JSON brief now."
  
     input_tokens = _count_tokens(system_prompt + user_message)
+    t0 = time.time()
  
     output_text, tools_called_log = _run_agent_loop(
         llm=llm,
@@ -599,6 +629,7 @@ RULES:
         max_tool_calls=4,  # up to 2 validation attempts
     )
  
+    latency_ms = int((time.time() - t0) * 1000)
     output_tokens = _count_tokens(output_text)
  
     # Parse the final JSON output
@@ -631,6 +662,7 @@ RULES:
         "step": len(state["execution_trace"]) + 1,
         "agent": "prompt_strategist",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "latency_ms": latency_ms,
         "input_summary": f"Synthesise brief from research context for: {query}",
         "tools_called": tool_names,
         "tool_outputs": tool_output_previews,
@@ -838,11 +870,6 @@ def supervisor_node(state: GraphState) -> GraphState:
         else:
             # Force strategist
             state["supervisor_decision"] = "prompt_strategist"
-        return state
-
-    # If strategist already produced output, finish
-    if state.get("final_answer") and isinstance(state["final_answer"], dict) and state["final_answer"]:
-        state["supervisor_decision"] = "FINISH"
         return state
 
     decision = _run_supervisor(state)
