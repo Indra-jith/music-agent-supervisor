@@ -1,0 +1,23 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Mac OS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Local traces (Optional: if you don't want to commit execution histories)
+traces/*.json

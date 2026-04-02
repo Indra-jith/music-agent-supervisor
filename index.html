@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wubble Music Intelligence Agent</title>
+    <style>
+        :root {
+            --bg-color: #0d0d0d;
+            --surface-color: #1a1a1a;
+            --surface-hover: #262626;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0a0;
+            --accent-cyan: #00D9FF;
+            --status-green: #00e676;
+            --status-red: #ff3d00;
+            --pill-teal: rgba(0, 150, 136, 0.2);
+            --pill-teal-text: #4db6ac;
+            --pill-blue: rgba(33, 150, 243, 0.2);
+            --pill-blue-text: #64b5f6;
+            --pill-purple: rgba(156, 39, 176, 0.2);
+            --pill-purple-text: #ba68c8;
+            --pill-gray: rgba(158, 158, 158, 0.1);
+            --pill-gray-text: #757575;
+            
+            --energy-low: #64b5f6;
+            --energy-mid: #ffb74d;
+            --energy-high: #ff5252;
+            --energy-dyn: #ba68c8;
+            
+            --border-radius: 6px;
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: "JetBrains Mono", "Fira Code", Consolas, Monaco, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            line-height: 1.5;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* --- Header --- */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--surface-hover);
+        }
+
+        .header-title h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .header-title p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--status-red); /* default red */
+            transition: background-color 0.3s;
+        }
+
+        .status-dot.online {
+            background-color: var(--status-green);
+            box-shadow: 0 0 8px var(--status-green);
+        }
+
+        /* --- Query Panel --- */
+        .query-panel {
+            background-color: var(--surface-color);
+            padding: 1.5rem;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--surface-hover);
+        }
+
+        textarea {
+            width: 100%;
+            height: 100px;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            border: 1px solid var(--surface-hover);
+            border-radius: var(--border-radius);
+            padding: 1rem;
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            resize: vertical;
+            margin-bottom: 1rem;
+            outline: none;
+        }
+
+        textarea:focus {
+            border-color: var(--accent-cyan);
+        }
+
+        .controls {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            flex: 1;
+            min-width: 200px;
+            max-width: 300px;
+        }
+
+        .slider-group label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: var(--bg-color);
+            border: 1px solid var(--surface-hover);
+            border-radius: var(--border-radius);
+            height: 8px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--accent-cyan);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .action-group {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.5rem;
+        }
+
+        button {
+            background-color: var(--accent-cyan);
+            color: #000;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: opacity 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .cost-estimate {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+        }
+
+        /* --- Loading State --- */
+        .loading-container {
+            display: none;
+            text-align: center;
+            padding: 3rem 0;
+            color: var(--accent-cyan);
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+        }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 2px solid var(--surface-hover);
+            border-top-color: var(--accent-cyan);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        #loading-text {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* --- Results Panel --- */
+        .results-panel {
+            display: none;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: 250px 1fr 300px;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 900px) {
+            .results-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .col {
+            background-color: var(--surface-color);
+            padding: 1.5rem;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--surface-hover);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .col-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--surface-hover);
+            padding-bottom: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Left Col: Info */
+        .info-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .info-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .pill-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .pill {
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            white-space: nowrap;
+            font-family: var(--font-mono);
+        }
+
+        .pill.teal { background: var(--pill-teal); color: var(--pill-teal-text); }
+        .pill.blue { background: var(--pill-blue); color: var(--pill-blue-text); }
+        .pill.purple { background: var(--pill-purple); color: var(--pill-purple-text); }
+        .pill.skipped { 
+            background: var(--pill-gray); 
+            color: var(--pill-gray-text); 
+            text-decoration: line-through; 
+        }
+
+        .stat {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+        }
+
+        #session-id-display {
+            font-size: 0.65rem;
+            color: var(--surface-hover);
+            word-break: break-all;
+            margin-top: auto;
+        }
+
+        /* Middle Col: Brief */
+        #brief-use-case {
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--accent-cyan);
+            line-height: 1.3;
+        }
+
+        .brief-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .brief-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .brief-val {
+            font-size: 0.9rem;
+        }
+
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+        }
+
+        .tag {
+            background: var(--surface-hover);
+            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+        }
+
+        ul.instrument-list {
+            list-style: none;
+            padding-left: 0;
+            font-size: 0.85rem;
+        }
+        ul.instrument-list li {
+            position: relative;
+            padding-left: 1rem;
+            margin-bottom: 0.25rem;
+            color: var(--text-secondary);
+        }
+        ul.instrument-list li::before {
+            content: "•";
+            color: var(--accent-cyan);
+            position: absolute;
+            left: 0;
+        }
+
+        .confidence-bar-bg {
+            background: var(--surface-hover);
+            height: 6px;
+            border-radius: 3px;
+            width: 100%;
+            overflow: hidden;
+            margin-top: 0.25rem;
+        }
+        .confidence-bar-fill {
+            height: 100%;
+            background: var(--status-green);
+        }
+
+        .gaps-list {
+            color: #ffb74d;
+            font-size: 0.8rem;
+            font-family: var(--font-mono);
+            padding-left: 1.2rem;
+            margin-top: 0.5rem;
+        }
+
+        /* Right Col: Trace */
+        .trace-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            max-height: 600px;
+            overflow-y: auto;
+            padding-right: 0.5rem;
+        }
+
+        .trace-list::-webkit-scrollbar {
+            width: 4px;
+        }
+        .trace-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .trace-list::-webkit-scrollbar-thumb {
+            background: var(--surface-hover);
+            border-radius: 2px;
+        }
+
+        .trace-item {
+            background: var(--bg-color);
+            border: 1px solid var(--surface-hover);
+            border-radius: 4px;
+            padding: 0.75rem;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+
+        .trace-item:hover {
+            border-color: var(--text-secondary);
+        }
+
+        .trace-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            color: var(--accent-cyan);
+        }
+
+        .trace-agent {
+            font-weight: bold;
+        }
+
+        .trace-quality {
+            font-size: 0.65rem;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            background: var(--surface-hover);
+            color: var(--text-primary);
+        }
+        .trace-quality.tool_failed { background: var(--status-red); }
+        .trace-quality.vague { background: #ffb74d; color: #000; }
+        .trace-quality.good { background: var(--status-green); color: #000; }
+
+        .trace-body {
+            display: none;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px dashed var(--surface-hover);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .trace-item.expanded .trace-body {
+            display: block;
+        }
+
+        /* System Banners */
+        .banner {
+            padding: 1rem;
+            border-radius: var(--border-radius);
+            margin-bottom: 1rem;
+            font-weight: 500;
+            display: none;
+        }
+        .banner.error {
+            background: rgba(255, 61, 0, 0.1);
+            color: var(--status-red);
+            border: 1px solid var(--status-red);
+            display: block;
+        }
+        .banner.warning {
+            background: rgba(255, 183, 77, 0.1);
+            color: #ffb74d;
+            border: 1px solid #ffb74d;
+            display: block;
+        }
+
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <div class="header-title">
+            <h1>Music Intelligence Agent</h1>
+            <p>Powered by LangGraph &middot; Groq &middot; Wubble</p>
+        </div>
+        <div class="status-indicator">
+            <div class="status-dot" id="api-status-dot"></div>
+            <span id="api-status-text">Checking backend...</span>
+        </div>
+    </header>
+
+    <div id="error-banner"></div>
+
+    <section class="query-panel">
+        <textarea id="query-input" placeholder="Describe the music you need... (e.g., 'A lo-fi hip hop track for studying, around 80 BPM')"></textarea>
+        
+        <div class="controls">
+            <div class="slider-group">
+                <label>
+                    <span>Token Budget</span>
+                    <span id="budget-val">5000</span>
+                </label>
+                <input type="range" id="budget-slider" min="2000" max="8000" step="500" value="5000">
+            </div>
+
+            <div class="action-group">
+                <button id="generate-btn">
+                    Generate Brief
+                </button>
+                <div class="cost-estimate" id="cost-estimate-label">Est. max cost: ~$0.0030</div>
+            </div>
+        </div>
+    </section>
+
+    <div class="loading-container" id="loading-state">
+        <div class="spinner"></div>
+        <div id="loading-text">Calling agents...</div>
+    </div>
+
+    <section class="results-panel" id="results-panel">
+        <div class="results-grid">
+            
+            <!-- Left: Execution Info -->
+            <div class="col">
+                <div class="col-title">Execution Info</div>
+                
+                <div class="info-row">
+                    <span class="info-label">Agents Called</span>
+                    <div class="pill-list" id="agents-called-list"></div>
+                </div>
+
+                <div class="info-row" style="margin-top: 0.5rem">
+                    <span class="info-label">Skipped</span>
+                    <div class="pill-list" id="agents-skipped-list"></div>
+                </div>
+
+                <div class="info-row" style="margin-top: 1rem">
+                    <span class="info-label">Iterations</span>
+                    <span class="stat" id="stat-iterations">-</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">Tokens (In / Out / Total)</span>
+                    <span class="stat" id="stat-tokens">-</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">Cost</span>
+                    <span class="stat" style="color: var(--status-green)" id="stat-cost">-</span>
+                </div>
+
+                <div id="session-id-display"></div>
+            </div>
+
+            <!-- Middle: Brief -->
+            <div class="col" id="brief-col">
+                <div class="col-title">Music Brief</div>
+                <div id="brief-use-case"></div>
+                
+                <div class="brief-grid" style="margin-top: 1rem">
+                    <div class="brief-item">
+                        <span class="info-label">Genre</span>
+                        <span class="brief-val" id="brief-genre"></span>
+                    </div>
+                    <div class="brief-item">
+                        <span class="info-label">BPM Range</span>
+                        <span class="brief-val" id="brief-bpm"></span>
+                    </div>
+                    <div class="brief-item">
+                        <span class="info-label">Key & Mode</span>
+                        <span class="brief-val" id="brief-key"></span>
+                    </div>
+                    <div class="brief-item">
+                        <span class="info-label">Energy Level</span>
+                        <span class="brief-val" id="brief-energy" style="text-transform: capitalize; font-weight: bold;"></span>
+                    </div>
+                </div>
+
+                <div class="brief-item" style="margin-top: 0.5rem">
+                    <span class="info-label">Mood Tags</span>
+                    <div class="tag-list" id="brief-moods"></div>
+                </div>
+
+                <div class="brief-item" style="margin-top: 0.5rem">
+                    <span class="info-label">Instrumentation</span>
+                    <ul class="instrument-list" id="brief-instruments"></ul>
+                </div>
+
+                <div class="brief-item" style="margin-top: auto; padding-top: 1rem; border-top: 1px solid var(--surface-hover)">
+                    <div style="display: flex; justify-content: space-between">
+                        <span class="info-label">Confidence Score</span>
+                        <span class="info-label" id="brief-conf-text"></span>
+                    </div>
+                    <div class="confidence-bar-bg">
+                        <div class="confidence-bar-fill" id="brief-conf-fill"></div>
+                    </div>
+                </div>
+
+                <div id="brief-gaps-container" style="display:none; margin-top: 0.5rem">
+                    <span class="info-label" style="color:#ffb74d">Identified Gaps</span>
+                    <ul class="gaps-list" id="brief-gaps"></ul>
+                </div>
+            </div>
+
+            <!-- Right: Trace -->
+            <div class="col">
+                <div class="col-title">Execution Trace</div>
+                <div class="trace-list" id="trace-list"></div>
+            </div>
+
+        </div>
+    </section>
+</div>
+
+<script>
+    const API_BASE = 'http://localhost:8000';
+    
+    // UI Elements
+    const statusDot = document.getElementById('api-status-dot');
+    const statusText = document.getElementById('api-status-text');
+    const queryInput = document.getElementById('query-input');
+    const budgetSlider = document.getElementById('budget-slider');
+    const budgetVal = document.getElementById('budget-val');
+    const costEstimate = document.getElementById('cost-estimate-label');
+    const generateBtn = document.getElementById('generate-btn');
+    const loadingState = document.getElementById('loading-state');
+    const loadingText = document.getElementById('loading-text');
+    const resultsPanel = document.getElementById('results-panel');
+    const errorBanner = document.getElementById('error-banner');
+
+    // Setup Budget Slider UI
+    budgetSlider.addEventListener('input', (e) => {
+        const val = e.target.value;
+        budgetVal.textContent = val;
+        // rough heuristic: $0.60 per 1M tokens -> 0.0000006 per token
+        const maxCost = (parseInt(val) * 0.0000006).toFixed(4);
+        costEstimate.textContent = `Est. max cost: ~$${maxCost}`;
+    });
+
+    // Initial Health Check
+    async function checkHealth() {
+        try {
+            const res = await fetch(`${API_BASE}/v1/health`);
+            if (res.ok) {
+                statusDot.className = 'status-dot online';
+                statusText.textContent = 'Backend Online';
+            } else {
+                throw new Error('Not OK');
+            }
+        } catch (err) {
+            statusDot.className = 'status-dot';
+            statusText.textContent = 'Backend Offline';
+        }
+    }
+    checkHealth();
+
+    // Loading Text Rotator
+    const loadingMessages = ["Supervisor reasoning...", "Calling agents...", "Validating brief...", "Synthesizing context..."];
+    let loadingInterval;
+    function startLoading() {
+        generateBtn.disabled = true;
+        errorBanner.innerHTML = '';
+        resultsPanel.style.display = 'none';
+        resultsPanel.style.opacity = '0';
+        loadingState.style.display = 'block';
+        
+        let i = 0;
+        loadingText.textContent = loadingMessages[0];
+        loadingInterval = setInterval(() => {
+            i = (i + 1) % loadingMessages.length;
+            loadingText.textContent = loadingMessages[i];
+        }, 1500);
+    }
+    function stopLoading() {
+        generateBtn.disabled = false;
+        loadingState.style.display = 'none';
+        clearInterval(loadingInterval);
+    }
+
+    function showError(msg) {
+        errorBanner.innerHTML = `<div class="banner error">${msg}</div>`;
+    }
+    function showWarning(msg) {
+        errorBanner.innerHTML = `<div class="banner warning">${msg}</div>`;
+    }
+
+    // Mapping colors for agents
+    function getAgentClass(agentName) {
+        if (agentName.includes('researcher')) return 'teal';
+        if (agentName.includes('analyst')) return 'blue';
+        if (agentName.includes('strategist')) return 'purple';
+        return '';
+    }
+
+    // Execution Logic
+    generateBtn.addEventListener('click', async () => {
+        const query = queryInput.value.trim();
+        if (!query) return;
+
+        startLoading();
+
+        try {
+            const res = await fetch(`${API_BASE}/v1/execute`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query: query,
+                    token_budget: parseInt(budgetSlider.value),
+                    max_iterations: 10
+                })
+            });
+
+            const data = await res.json();
+            stopLoading();
+
+            if (!res.ok) {
+                showError(data.detail || 'Execution failed');
+                return;
+            }
+
+            renderResults(data);
+
+        } catch (err) {
+            stopLoading();
+            showError("Network error: Could not reach backend.");
+        }
+    });
+
+    function renderResults(data) {
+        const ans = data.final_answer;
+
+        // Check for clarification
+        if (ans.status === "clarification_needed") {
+            showWarning(`Clarification Needed: ${ans.message}`);
+            return;
+        }
+
+        // 1. Info Column
+        const agentsDiv = document.getElementById('agents-called-list');
+        const skippedDiv = document.getElementById('agents-skipped-list');
+        
+        agentsDiv.innerHTML = data.agents_called.map(a => `<span class="pill ${getAgentClass(a)}">${a}</span>`).join('');
+        skippedDiv.innerHTML = data.skipped_agents.length 
+            ? data.skipped_agents.map(a => `<span class="pill skipped">${a}</span>`).join('')
+            : '<span class="info-label" style="font-size:0.7rem">None</span>';
+
+        document.getElementById('stat-iterations').textContent = data.iterations;
+        
+        const tu = data.token_usage;
+        document.getElementById('stat-tokens').textContent = `${tu.input_tokens} / ${tu.output_tokens} / ${tu.total}`;
+        document.getElementById('stat-cost').textContent = `$${tu.estimated_cost_usd.toFixed(4)}`;
+        document.getElementById('session-id-display').textContent = `ID: ${data.session_id}`;
+
+        // 2. Brief Column
+        document.getElementById('brief-use-case').textContent = ans.use_case || 'N/A';
+        document.getElementById('brief-genre').textContent = ans.genre + (ans.subgenre ? ` (${ans.subgenre})` : '');
+        
+        const bpm = ans.bpm || {};
+        document.getElementById('brief-bpm').textContent = (bpm.min && bpm.max) ? `${bpm.min} - ${bpm.max} BPM` : 'N/A';
+        document.getElementById('brief-key').textContent = `${ans.key || '?'} | ${ans.time_signature || '?'}`;
+        
+        const energyEl = document.getElementById('brief-energy');
+        const energyLvl = (ans.energy_level || 'medium').toLowerCase();
+        energyEl.textContent = energyLvl;
+        if(energyLvl === 'low') energyEl.style.color = 'var(--energy-low)';
+        else if(energyLvl === 'high') energyEl.style.color = 'var(--energy-high)';
+        else if(energyLvl === 'dynamic') energyEl.style.color = 'var(--energy-dyn)';
+        else energyEl.style.color = 'var(--energy-mid)';
+
+        document.getElementById('brief-moods').innerHTML = (ans.mood_tags || []).map(m => `<span class="tag">${m}</span>`).join('');
+        document.getElementById('brief-instruments').innerHTML = (ans.instrumentation || []).map(i => `<li>${i}</li>`).join('');
+
+        const conf = ans.confidence_score || 0;
+        document.getElementById('brief-conf-text').textContent = conf.toFixed(2);
+        const confFill = document.getElementById('brief-conf-fill');
+        confFill.style.width = `${Math.min(conf * 100, 100)}%`;
+        if(conf >= 0.8) confFill.style.background = 'var(--status-green)';
+        else if(conf >= 0.5) confFill.style.background = '#ffb74d';
+        else confFill.style.background = 'var(--status-red)';
+
+        const gapsDiv = document.getElementById('brief-gaps-container');
+        if (ans.gaps && ans.gaps.length > 0) {
+            gapsDiv.style.display = 'block';
+            document.getElementById('brief-gaps').innerHTML = ans.gaps.map(g => `<li>${g}</li>`).join('');
+        } else {
+            gapsDiv.style.display = 'none';
+        }
+
+        // 3. Trace Column
+        const traceList = document.getElementById('trace-list');
+        traceList.innerHTML = data.execution_trace.map(t => {
+            const isAgent = t.agent && t.agent !== 'supervisor';
+            const name = t.agent || t.step;
+            const qBadge = t.output_quality ? `<span class="trace-quality ${t.output_quality}">${t.output_quality}</span>` : '';
+            
+            let bodyContent = '';
+            if(isAgent) {
+                bodyContent = `Summary:\n${t.agent_output_summary || 'N/A'}\n\nTools:\n${JSON.stringify(t.tools_called || [])}`;
+            } else if(t.reasoning) {
+                bodyContent = `Decision: ${t.decision}\nReasoning: ${t.reasoning}`;
+            } else {
+                bodyContent = JSON.stringify(t, null, 2);
+            }
+
+            return `
+                <div class="trace-item" onclick="this.classList.toggle('expanded')">
+                    <div class="trace-header">
+                        <span class="trace-agent">${name}</span>
+                        ${qBadge}
+                    </div>
+                    <div>Step ${t.step || '?'}</div>
+                    <div class="trace-body">${bodyContent}</div>
+                </div>
+            `;
+        }).join('');
+
+        // Reveal
+        resultsPanel.style.display = 'block';
+        // force reflow
+        void resultsPanel.offsetWidth;
+        resultsPanel.style.opacity = '1';
+    }
+
+</script>
+</body>
+</html>

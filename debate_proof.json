@@ -1,0 +1,50 @@
+{
+  "Agents Called": [
+    "music_researcher",
+    "trend_analyst",
+    "prompt_strategist"
+  ],
+  "Tokens": {
+    "input_tokens": 5405,
+    "output_tokens": 1664,
+    "total": 7069,
+    "estimated_cost_usd": 0.004504
+  },
+  "Final JSON": {
+    "use_case": "extreme and experimental metal music for high-energy settings or advertisements",
+    "mood_tags": [
+      "Chaotic",
+      "Intense",
+      "Contrasting",
+      "Turbulent",
+      "Unpredictable"
+    ],
+    "genre": "Experimental Metal",
+    "subgenre": [
+      "Doom Metal",
+      "Thrash Metal"
+    ],
+    "bpm": {
+      "min": 165,
+      "max": 175
+    },
+    "key": "E minor or C minor",
+    "time_signature": "4/4 with possible complex variations",
+    "instrumentation": [
+      "Electric guitars with heavy distortion",
+      "Double-bass drum kit",
+      "Prominent, driving bass guitar",
+      "Screaming or growling vocals",
+      "Synthesizers or keyboards"
+    ],
+    "energy_level": "high",
+    "duration_seconds": 240,
+    "reference_tracks": [],
+    "generation_notes": "Blend of doom metal mood with fast tempo, potentially using AI trained on doom and fast-paced metal genres, with notes on the lack of direct references and the experimental nature of the query",
+    "confidence_score": 0.6,
+    "gaps": [
+      "Lack of direct reference tracks",
+      "Uncertainty in exact key and time signature variations"
+    ]
+  }
+}
