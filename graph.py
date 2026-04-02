@@ -21,7 +21,8 @@ from typing import Any, Optional
 
 import tiktoken
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 
@@ -119,12 +120,17 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
 # ---------------------------------------------------------------------------
 
 
-def _duckduckgo_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo. Returns formatted results or error message."""
+@tool
+def duckduckgo_search(query: str) -> str:
+    """Search the web using DuckDuckGo. Use this to find music genre
+    characteristics, BPM ranges, cultural context, reference tracks,
+    instrumentation data, and current music trends."""
     try:
+        import time
+        time.sleep(0.5)
         from duckduckgo_search import DDGS
-        with DDGS(timeout=3) as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
         if not results:
             return "[DuckDuckGo returned no results]"
         lines = []
@@ -133,44 +139,142 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"[DuckDuckGo search failed: {e}]"
-
-
-def _wikipedia_search(query: str) -> str:
-    """Search Wikipedia. Returns summary or error."""
+ 
+ 
+@tool
+def wikipedia_search(query: str) -> str:
+    """Search Wikipedia for encyclopedic information about music genres,
+    cultural context, artists, historical music movements, and regional
+    music traditions."""
     try:
         import wikipedia
-
         results = wikipedia.search(query, results=3)
         if not results:
             return "[Wikipedia returned no results]"
         summaries = []
         for title in results[:2]:
             try:
-                summary = wikipedia.summary(title, sentences=5, auto_suggest=False)
-                summaries.append(f"### {title}\n{summary}")
+                page = wikipedia.page(title, auto_suggest=False)
+                summaries.append(f"### {page.title}\n{page.summary[:1500]}")
             except (wikipedia.DisambiguationError, wikipedia.PageError):
                 continue
         return "\n\n".join(summaries) if summaries else "[Wikipedia: no usable pages found]"
     except Exception as e:
         return f"[Wikipedia search failed: {e}]"
-
-
-def _arxiv_search(query: str, max_results: int = 3) -> str:
-    """Search ArXiv. Returns paper summaries or error."""
+ 
+ 
+@tool
+def arxiv_search(query: str) -> str:
+    """Search ArXiv for academic papers on AI music generation, music
+    information retrieval, and computational musicology. Use this to
+    find research-backed data on BPM, key signatures, and instrumentation."""
     try:
         import arxiv
-
         client = arxiv.Client()
-        search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.Relevance)
+        search = arxiv.Search(
+            query=query,
+            max_results=3,
+            sort_by=arxiv.SortCriterion.Relevance
+        )
         results = list(client.results(search))
         if not results:
             return "[ArXiv returned no results]"
         lines = []
         for paper in results:
-            lines.append(f"- **{paper.title}** ({paper.published.year}): {paper.summary[:400]}...")
+            lines.append(
+                f"- **{paper.title}** ({paper.published.year}): {paper.summary[:400]}..."
+            )
         return "\n".join(lines)
     except Exception as e:
         return f"[ArXiv search failed: {e}]"
+ 
+ 
+@tool
+def validate_json(json_string: str) -> str:
+    """Validate and parse a JSON string. Returns 'VALID' if the JSON is
+    well-formed, or an error message describing what is wrong so you can
+    fix it. Use this before finalising your music brief output."""
+    try:
+        clean = json_string.strip()
+        if clean.startswith("```"):
+            lines = clean.split("\n")
+            clean = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        json.loads(clean)
+        return "VALID: JSON is well-formed and parseable."
+    except json.JSONDecodeError as e:
+        return f"INVALID: {e}. Fix the JSON and call this tool again."
+ 
+ 
+def _run_agent_loop(
+    llm,
+    tools: list,
+    system_prompt: str,
+    user_message: str,
+    max_tool_calls: int = 6,
+) -> tuple[str, list[dict]]:
+    """
+    Run a tool-calling agent loop.
+ 
+    Returns:
+        (final_text_output, list_of_tool_calls_made)
+    """
+    llm_with_tools = llm.bind_tools(tools)
+    tool_map = {t.name: t for t in tools}
+ 
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_message),
+    ]
+ 
+    tools_called_log = []
+    call_count = 0
+ 
+    while call_count < max_tool_calls:
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)  # append AIMessage to history
+ 
+        # If the LLM made no tool calls, it's done — return its text
+        if not response.tool_calls:
+            return response.content, tools_called_log
+ 
+        # Execute each tool the LLM requested
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id   = tool_call["id"]
+ 
+            tool_fn = tool_map.get(tool_name)
+            if tool_fn is None:
+                tool_result = f"[Error: tool '{tool_name}' not found]"
+            else:
+                try:
+                    tool_result = tool_fn.invoke(tool_args)
+                except Exception as e:
+                    tool_result = f"[Tool execution error: {e}]"
+ 
+            tools_called_log.append({
+                "tool": tool_name,
+                "args": tool_args,
+                "result_preview": str(tool_result)[:400],
+            })
+ 
+            # Feed the tool result back to the LLM as a ToolMessage
+            messages.append(
+                ToolMessage(
+                    content=str(tool_result),
+                    tool_call_id=tool_id,
+                )
+            )
+ 
+        call_count += 1
+ 
+    # Safety: hit max_tool_calls — ask LLM to wrap up with what it has
+    messages.append(
+        HumanMessage(content="You have used the maximum number of tool calls. "
+                             "Synthesise your findings now and produce your final output.")
+    )
+    final = llm_with_tools.invoke(messages)
+    return final.content, tools_called_log
 
 
 # ---------------------------------------------------------------------------
@@ -260,82 +364,74 @@ def _assess_quality(output: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_music_researcher(state: GraphState) -> dict:
-    """Music Researcher agent: genre, mood, cultural context, references."""
+def _run_music_researcher(state) -> dict:
+    """Music Researcher: autonomously searches for genre, mood, cultural
+    context, and reference tracks using bound tools."""
+    from graph import _get_llm, _count_tokens, _assess_quality, _persist_trace
+ 
     query = state["query"]
-    llm = _get_llm(temperature=0.4)
-
-    # Gather tool outputs
-    tools_called = []
-    tool_outputs = []
-
-    ddg_result = _duckduckgo_search(f"{query} music genre mood style")
-    
-    # Pure handling: If DuckDuckGo genuinely succeeded, use it.
-    if "[DuckDuckGo search failed" not in ddg_result and "[DuckDuckGo returned no results]" not in ddg_result:
-        tools_called.append("duckduckgo_search")
-        tool_outputs.append(ddg_result)
-        tool_context = f"Internet Search Results:\n{ddg_result}"
-    else:
-        # DDG was blocked or found nothing. Fallback purely to Wikipedia.
-        wiki_result = _wikipedia_search(f"{query} music genre")
-        if "[Wikipedia search failed" not in wiki_result and "[Wikipedia: no usable pages found]" not in wiki_result:
-            tools_called.append("wikipedia_search")
-            tool_outputs.append(wiki_result)
-            tool_context = f"Wikipedia Context:\n{wiki_result}"
-        else:
-            # Both tools legitimately failed to find data.
-            tools_called.append("internal_knowledge")
-            tool_context = "No external internet context could be found for this specific query. Please generate the music brief strictly using your internal Llama-3 training data."
-
-    system_prompt = """You are a Music Research specialist. Given a music query, research and return:
-
-REQUIRED fields (always attempt):
-- genre: Primary genre and relevant subgenres
+    llm   = _get_llm(temperature=0.4)
+ 
+    system_prompt = """You are a Music Research specialist with access to web search tools.
+ 
+Your goal: research the music query and return a structured report covering:
+- genre: primary genre and relevant subgenres
 - mood_descriptors: 3-5 specific emotional/atmospheric words (not generic like "nice")
-- cultural_context: Who listens to this? What occasions? What brands use it?
-- reference_tracks: 2-3 specific artists or tracks that exemplify the style
-
-OPTIONAL fields (only if clearly relevant):
-- avoid_list: What this music should NOT sound like
-- regional_notes: Any geographic or cultural specificity
-
-FAILURE BEHAVIOR:
-- If tools returned no results, return what you know from training data and flag: 
-  "confidence: low — relying on internal knowledge base"
-- Never fabricate references. If unsure, say so.
-- If the query is too vague, interpret it in the most commercially useful direction and note your interpretation.
-
-Return your findings as structured text with clear section headers.
-Do not pad your response — if you found what you need, stop."""
-
-
-
-    user_msg = f"Query: {query}\n\nTool research results:\n{tool_context}"
+- cultural_context: who listens to this, what occasions, what brands use it
+- reference_tracks: 2-3 specific real artists or tracks that exemplify the style
+- avoid_list: what this music should NOT sound like (if relevant)
+- regional_notes: geographic or cultural specificity (if relevant)
+ 
+HOW TO USE YOUR TOOLS:
+- Call duckduckgo_search first with a specific query like "{query} music genre mood style"
+- If DuckDuckGo returns no results or fails, call wikipedia_search as a fallback
+- Use multiple searches if your first result is too vague
+- Stop searching once you have enough specific information
+ 
+RULES:
+- Never fabricate reference tracks. If unsure, say so.
+- If tools return no results, use your training knowledge and flag: "confidence: low"
+- A short, accurate answer beats a long, vague one."""
+ 
+    user_message = f"Research this music query: {query}"
+ 
     if state.get("contradiction_detected"):
-        user_msg += f"\n\nDEFEND YOUR POSITION: A contradiction was detected with the other agent:\n{state['contradiction_detected']}\nPlease review your previous output and sources. Either provide stronger evidence or concede the point. Update your findings accordingly."
-
-    input_tokens = _count_tokens(system_prompt + user_msg)
-    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
-    output_text = response.content
+        user_message += (
+            f"\n\nDEFEND YOUR POSITION: A contradiction was detected:\n"
+            f"{state['contradiction_detected']}\n"
+            f"Search for stronger evidence to support or update your previous findings."
+        )
+ 
+    # Count input tokens (approximate — full message history not known upfront)
+    input_tokens = _count_tokens(system_prompt + user_message)
+ 
+    output_text, tools_called_log = _run_agent_loop(
+        llm=llm,
+        tools=[duckduckgo_search, wikipedia_search],
+        system_prompt=system_prompt,
+        user_message=user_message,
+        max_tool_calls=4,
+    )
+ 
     output_tokens = _count_tokens(output_text)
-
     quality = _assess_quality(output_text)
-
+ 
+    tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
+    tool_output_previews = [t["result_preview"] for t in tools_called_log]
+ 
     trace_entry = {
         "step": len(state["execution_trace"]) + 1,
         "agent": "music_researcher",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "input_summary": f"Research genre/mood/cultural context for: {query}",
-        "tools_called": tools_called,
-        "tool_outputs": [t[:1000] for t in tool_outputs],  # Truncate but never omit
+        "tools_called": tool_names,
+        "tool_outputs": tool_output_previews,
         "agent_output_summary": output_text[:800],
         "output_quality": quality,
         "tokens_used": input_tokens + output_tokens,
     }
-
     _persist_trace(state["session_id"], trace_entry)
-
+ 
     return {
         "output": output_text,
         "trace": trace_entry,
@@ -343,91 +439,84 @@ Do not pad your response — if you found what you need, stop."""
         "output_tokens": output_tokens,
         "quality": quality,
     }
-
-
-def _run_trend_analyst(state: GraphState) -> dict:
-    """Trend Analyst agent: BPM, key, instrumentation, AI trends."""
-    query = state["query"]
+ 
+ 
+def _run_trend_analyst(state) -> dict:
+    """Trend Analyst: autonomously searches for BPM, key, instrumentation,
+    and AI music generation trends using bound tools."""
+    from graph import _get_llm, _count_tokens, _assess_quality, _persist_trace
+ 
+    query        = state["query"]
     prior_research = state.get("researcher_output", "")
-    llm = _get_llm(temperature=0.3)
-
-    tools_called = []
-    tool_outputs = []
-
-    tool_context_parts = []
-    
-    # ArXiv for AI music generation research
-    arxiv_result = _arxiv_search(f"AI music generation {query}")
-    if "[ArXiv search failed" not in arxiv_result and "[ArXiv returned no results]" not in arxiv_result:
-        tools_called.append("arxiv_search")
-        tool_outputs.append(arxiv_result)
-        tool_context_parts.append(f"ArXiv research:\n{arxiv_result}")
-
-    # DuckDuckGo for technical parameters
-    ddg_result = _duckduckgo_search(f"{query} BPM tempo key instrumentation music production")
-    if "[DuckDuckGo search failed" not in ddg_result and "[DuckDuckGo returned no results]" not in ddg_result:
-        tools_called.append("duckduckgo_search")
-        tool_outputs.append(ddg_result)
-        tool_context_parts.append(f"DuckDuckGo research:\n{ddg_result}")
-        
-    if not tool_context_parts:
-        tools_called.append("internal_knowledge")
-        tool_context = "No external internet context could be found. Please generate the technical parameters strictly using your internal Llama-3 training data."
-    else:
-        tool_context = "\n\n".join(tool_context_parts)
-
-    system_prompt = """You are an AI Music Trend Analyst. Given a music query (and any prior research 
-context), return technical parameters and current market intelligence.
-
-REQUIRED fields (always attempt):
-- bpm_range: Specific min/max BPM (e.g., 70-90, not "slow")
-- key_and_mode: Likely musical key(s) and mode (major/minor/modal)
-- time_signature: Most common for this style
+    llm          = _get_llm(temperature=0.3)
+ 
+    system_prompt = """You are an AI Music Trend Analyst with access to research tools.
+ 
+Your goal: find technical music parameters and current market data for the query.
+ 
+REQUIRED output fields:
+- bpm_range: specific min/max BPM (e.g. 70-90, NOT "slow")
+- key_and_mode: likely musical key(s) and mode (major/minor/modal)
+- time_signature: most common for this style
 - core_instrumentation: 4-6 specific instruments or sound types
-- energy_contour: How energy changes over time (builds, drops, steady)
-
-OPTIONAL fields (if relevant):
-- ai_generation_notes: Relevant findings from ArXiv on generating this style
-- market_trends: What's performing well in this niche right now
-
-FAILURE BEHAVIOR:
-- If ArXiv has no relevant papers, skip that section and note it.
-- If you cannot find specific BPM data, give a range based on genre knowledge 
-  and flag: "estimated — no direct source found"
-- Do not guess wildly. A range of 60-140 BPM is useless. Be specific.
-- If the query is for a niche style with little data, acknowledge the uncertainty 
-  explicitly rather than fabricating precision.
-
-Return structured text with clear section headers.
-Do not repeat information already gathered by music_researcher."""
-
-    prior = f"\n\nPrior research context:\n{prior_research[:1500]}" if prior_research else ""
-
-    user_msg = f"Query: {query}{prior}\n\nTool research results:\n{tool_context}"
+- energy_contour: how energy changes over time (builds, drops, steady)
+ 
+OPTIONAL fields (only if relevant):
+- ai_generation_notes: findings from ArXiv on generating this style
+- market_trends: what is performing well in this niche right now
+ 
+HOW TO USE YOUR TOOLS:
+- Call arxiv_search for academic research on AI music generation for this style
+- Call duckduckgo_search for current BPM data, production techniques, market trends
+- Use specific queries like "{query} BPM tempo key instrumentation music production"
+- If one source fails, try the other
+ 
+RULES:
+- A range of 60-140 BPM is useless. Be specific — e.g. 85-95 BPM.
+- If you cannot find a specific value, estimate from genre knowledge and flag it
+- Do not repeat information already in the prior research context below"""
+ 
+    user_message = f"Query: {query}"
+    if prior_research:
+        user_message += f"\n\nPrior research context (do not repeat this):\n{prior_research[:1500]}"
+    user_message += "\n\nFind the technical parameters for this music query."
+ 
     if state.get("contradiction_detected"):
-        user_msg += f"\n\nDEFEND YOUR POSITION: A contradiction was detected with the other agent:\n{state['contradiction_detected']}\nPlease review your previous output and sources. Either provide stronger evidence or concede the point. Update your findings accordingly."
-
-    input_tokens = _count_tokens(system_prompt + user_msg)
-    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
-    output_text = response.content
+        user_message += (
+            f"\n\nDEFEND YOUR POSITION: A contradiction was detected:\n"
+            f"{state['contradiction_detected']}\n"
+            f"Search for stronger evidence to support or update your technical findings."
+        )
+ 
+    input_tokens = _count_tokens(system_prompt + user_message)
+ 
+    output_text, tools_called_log = _run_agent_loop(
+        llm=llm,
+        tools=[arxiv_search, duckduckgo_search],
+        system_prompt=system_prompt,
+        user_message=user_message,
+        max_tool_calls=4,
+    )
+ 
     output_tokens = _count_tokens(output_text)
-
     quality = _assess_quality(output_text)
-
+ 
+    tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
+    tool_output_previews = [t["result_preview"] for t in tools_called_log]
+ 
     trace_entry = {
         "step": len(state["execution_trace"]) + 1,
         "agent": "trend_analyst",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "input_summary": f"Find technical parameters (BPM/key/instrumentation) for: {query}",
-        "tools_called": tools_called,
-        "tool_outputs": [t[:1000] for t in tool_outputs],
+        "tools_called": tool_names,
+        "tool_outputs": tool_output_previews,
         "agent_output_summary": output_text[:800],
         "output_quality": quality,
         "tokens_used": input_tokens + output_tokens,
     }
-
     _persist_trace(state["session_id"], trace_entry)
-
+ 
     return {
         "output": output_text,
         "trace": trace_entry,
@@ -435,22 +524,24 @@ Do not repeat information already gathered by music_researcher."""
         "output_tokens": output_tokens,
         "quality": quality,
     }
-
-
-def _run_prompt_strategist(state: GraphState) -> dict:
-    """Prompt Strategist agent: synthesize context into a validated JSON brief."""
-    query = state["query"]
+ 
+ 
+def _run_prompt_strategist(state) -> dict:
+    """Prompt Strategist: autonomously synthesises research into a validated
+    JSON brief, using the validate_json tool to check its own output."""
+    from graph import _get_llm, _count_tokens, _persist_trace
+    import json
+ 
+    query          = state["query"]
     researcher_out = state.get("researcher_output", "")
-    analyst_out = state.get("analyst_output", "")
-    llm = _get_llm(temperature=0.2)
-
-    tools_called = []
-    tool_outputs = []
-
-    system_prompt = """You are a Music Prompt Strategist. Your job is to synthesize all gathered research 
-into a validated JSON music generation brief.
-
-OUTPUT SCHEMA (strict — return ONLY this JSON, no markdown fences, no explanation before or after):
+    analyst_out    = state.get("analyst_output", "")
+    llm            = _get_llm(temperature=0.2)
+ 
+    system_prompt = """You are a Music Prompt Strategist with access to a JSON validation tool.
+ 
+Your job: synthesise all research into a validated JSON music generation brief.
+ 
+STEP 1 — Write the JSON brief matching this exact schema:
 {
   "use_case": str,
   "mood_tags": [str],
@@ -467,77 +558,89 @@ OUTPUT SCHEMA (strict — return ONLY this JSON, no markdown fences, no explanat
   "confidence_score": float,
   "gaps": [str]
 }
-
+ 
+STEP 2 — Call validate_json with your JSON string to check it is valid.
+  - If VALID: your task is complete. Output ONLY the JSON — no extra text.
+  - If INVALID: fix the errors and call validate_json again until it passes.
+ 
+CONTRADICTION RULE:
+  If the researcher and analyst data directly contradict each other on a key
+  parameter (e.g. BPM 60 vs BPM 170), do NOT produce the full JSON.
+  Instead output exactly: {"contradiction": "clear explanation of the conflict"}
+  Do NOT call validate_json in this case.
+ 
 RULES:
-- confidence_score reflects how much of the brief is backed by research vs. estimated.
-  0.9+ = nearly all fields sourced. 0.5-0.7 = significant estimation. Below 0.5 = flag.
-- NEVER fabricate reference tracks. Use [] if none were found.
-- NEVER omit the gaps field. An empty list is fine if everything is covered.
-- IF YOU DETECT A CONTRADICTION between the researcher and analyst (e.g. they disagree on BPM), DO NOT produce the full JSON! Instead, return a JSON object with exactly one field:
-  {"contradiction": "Explanation of the conflict (e.g., Researcher says 60 BPM, Analyst says 120 BPM)."}
-- If you received contradictory information from prior agents but they have already defended their positions (check the context), pick the more specific/sourced one and note the contradiction in generation_notes.
-- A brief with honest gaps is better than a brief that hides them.
-
-Return ONLY the JSON object. No extra text."""
-
+  - confidence_score: 0.9+ = nearly all fields sourced. Below 0.5 = flag.
+  - Never fabricate reference_tracks. Use [] if none were found.
+  - Never omit the gaps field. Empty list [] is fine if everything is covered.
+  - A brief with honest gaps beats one that hides them.
+  - Output ONLY the final JSON — no markdown fences, no explanation."""
+ 
     context_parts = [f"Original query: {query}"]
     if researcher_out:
         context_parts.append(f"Music Researcher findings:\n{researcher_out[:2000]}")
     if analyst_out:
         context_parts.append(f"Trend Analyst findings:\n{analyst_out[:2000]}")
     if not researcher_out and not analyst_out:
-        context_parts.append("No prior agent research available. Use your training knowledge and flag low confidence.")
-
-    user_msg = "\n\n".join(context_parts)
-
-    input_tokens = _count_tokens(system_prompt + user_msg)
-    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
-    output_text = response.content.strip()
+        context_parts.append(
+            "No prior agent research available. "
+            "Use your training knowledge and set confidence_score low."
+        )
+ 
+    user_message = "\n\n".join(context_parts) + "\n\nProduce the validated JSON brief now."
+ 
+    input_tokens = _count_tokens(system_prompt + user_message)
+ 
+    output_text, tools_called_log = _run_agent_loop(
+        llm=llm,
+        tools=[validate_json],
+        system_prompt=system_prompt,
+        user_message=user_message,
+        max_tool_calls=4,  # up to 2 validation attempts
+    )
+ 
     output_tokens = _count_tokens(output_text)
-
-    # Validate JSON with Python (the "REPL" step)
-    tools_called.append("python_json_validation")
+ 
+    # Parse the final JSON output
+    tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
+    tool_output_previews = [t["result_preview"] for t in tools_called_log]
+ 
     parsed_json = None
     validation_status = "success"
     try:
-        # Strip markdown fences if present
-        clean = output_text
+        clean = output_text.strip()
         if clean.startswith("```"):
             lines = clean.split("\n")
             clean = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         parsed_json = json.loads(clean)
-        tool_outputs.append("JSON validation: PASSED")
     except json.JSONDecodeError as e:
-        validation_status = f"JSON parse failed: {e}"
-        tool_outputs.append(f"JSON validation: FAILED — {e}")
-        # Try to fix common issues
+        validation_status = f"final parse failed: {e}"
+        # Last-resort extraction
         try:
-            # Attempt to extract JSON from mixed output
             start = output_text.find("{")
-            end = output_text.rfind("}") + 1
+            end   = output_text.rfind("}") + 1
             if start != -1 and end > start:
                 parsed_json = json.loads(output_text[start:end])
-                tool_outputs.append("JSON extraction from mixed output: PASSED")
                 validation_status = "success (extracted)"
         except Exception:
             pass
-
+ 
     quality = "good" if parsed_json else "tool_failed"
-
+ 
     trace_entry = {
         "step": len(state["execution_trace"]) + 1,
         "agent": "prompt_strategist",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "input_summary": f"Synthesize brief from research context for: {query}",
-        "tools_called": tools_called,
-        "tool_outputs": tool_outputs,
+        "input_summary": f"Synthesise brief from research context for: {query}",
+        "tools_called": tool_names,
+        "tool_outputs": tool_output_previews,
         "agent_output_summary": output_text[:800],
         "output_quality": quality,
         "tokens_used": input_tokens + output_tokens,
+        "validation_status": validation_status,
     }
-
     _persist_trace(state["session_id"], trace_entry)
-
+ 
     return {
         "output": output_text,
         "parsed_json": parsed_json,
