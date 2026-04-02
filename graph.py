@@ -1,4 +1,4 @@
-# graph.py 
+# graph.py
 """
 LangGraph Supervisor + Agent definitions for the Music Intelligence System.
 
@@ -7,17 +7,28 @@ Architecture:
   - Three worker agents: music_researcher, trend_analyst, prompt_strategist.
   - All routing is dynamic — no hardcoded edges between agents.
   - Trace entries are persisted to disk after every agent call.
+
+Fixes applied (v2):
+  - Bug 1: Budget cutoff now returns "FINISH" (uppercase) consistently.
+  - Bug 2: Node functions return dict updates instead of mutating state in place
+           (pure-function paradigm required by LangGraph reducers).
+  - Bug 3: event_callback removed from GraphState to enable future checkpointing.
+           It is now passed via a thread-local wrapper at execution time.
+  - Bug 4: Token counting now includes full message history in the agent loop.
+  - Issue 5: Supervisor state summary increased from 300 to 600 chars.
+  - Issue 6: Deprecated on_event replaced with lifespan in main.py (see main.py).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, Callable, Optional, TypedDict
 
 import tiktoken
 from dotenv import load_dotenv
@@ -27,6 +38,16 @@ from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 
 load_dotenv()
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
+
+def validate_environment() -> None:
+    """Validate that required environment variables are set."""
+    if not os.getenv("GROQ_API_KEY"):
+        raise RuntimeError("GROQ_API_KEY environment variable is not set. Please create a .env file or set it in your environment.")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -39,17 +60,57 @@ AGENT_NAMES = ["music_researcher", "trend_analyst", "prompt_strategist"]
 MAX_RETRIES_PER_AGENT = 3  # initial + retry + debate
 
 # ---------------------------------------------------------------------------
+# Thread-local event callback (replaces storing callable in GraphState)
+# ---------------------------------------------------------------------------
+
+_local = threading.local()
+
+
+def _get_callback() -> Optional[Callable]:
+    """Retrieve the event callback for the current thread, if any."""
+    return getattr(_local, "event_callback", None)
+
+
+def _set_callback(cb: Optional[Callable]) -> None:
+    """Set the event callback for the current thread."""
+    _local.event_callback = cb
+
+
+def _emit(event_type: str, data: dict) -> None:
+    """Fire an event callback if one is registered for this thread."""
+    cb = _get_callback()
+    if cb:
+        try:
+            cb(event_type, data)
+        except Exception:
+            pass  # Never let callback errors crash the graph
+
+
+# ---------------------------------------------------------------------------
 # Token counting helper
 # ---------------------------------------------------------------------------
 
 # NOTE: cl100k_base is an OpenAI encoding. Llama-3.3 uses a different tokenizer.
 # We use cl100k_base as a close-enough proxy (~±15%) for cost estimation.
-# For production, use the actual Llama tokenizer.
+# For production, use the actual Llama tokenizer via HuggingFace tokenizers.
 _ENC = tiktoken.get_encoding("cl100k_base")
 
 
 def _count_tokens(text: str) -> int:
     return len(_ENC.encode(text, disallowed_special=()))
+
+
+def _count_message_tokens(messages: list) -> int:
+    """Count tokens across a full message list, including tool call content."""
+    total = 0
+    for msg in messages:
+        content = msg.content if hasattr(msg, "content") else str(msg)
+        total += _count_tokens(str(content))
+        # Also count tool call arguments if present
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                total += _count_tokens(json.dumps(tc.get("args", {})))
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +137,17 @@ class GraphState(TypedDict, total=False):
     iteration: int
     token_budget: int
     contradiction_detected: str
-    event_callback: Any
+    # NOTE: event_callback intentionally removed from state.
+    # It is injected via thread-local (_set_callback) so graph state
+    # remains fully serialisable for future checkpointer compatibility.
 
 
-def _default_state(query: str, session_id: str | None = None, max_iterations: int = 10, token_budget: int = 5000, event_callback: Any = None) -> GraphState:
+def _default_state(
+    query: str,
+    session_id: str | None = None,
+    max_iterations: int = 10,
+    token_budget: int = 5000,
+) -> GraphState:
     return GraphState(
         query=query,
         session_id=session_id or str(uuid.uuid4()),
@@ -99,7 +167,6 @@ def _default_state(query: str, session_id: str | None = None, max_iterations: in
         iteration=0,
         token_budget=token_budget,
         contradiction_detected="",
-        event_callback=event_callback,
     )
 
 
@@ -127,11 +194,12 @@ def duckduckgo_search(query: str) -> str:
     characteristics, BPM ranges, cultural context, reference tracks,
     instrumentation data, and current music trends."""
     try:
-        import time
-        time.sleep(0.5)
         from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with DDGS(timeout=10) as ddgs:
+                results = list(ddgs.text(query, max_results=5))
         if not results:
             return "[DuckDuckGo returned no results]"
         lines = []
@@ -140,8 +208,8 @@ def duckduckgo_search(query: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"[DuckDuckGo search failed: {e}]"
- 
- 
+
+
 @tool
 def wikipedia_search(query: str) -> str:
     """Search Wikipedia for encyclopedic information about music genres,
@@ -162,8 +230,8 @@ def wikipedia_search(query: str) -> str:
         return "\n\n".join(summaries) if summaries else "[Wikipedia: no usable pages found]"
     except Exception as e:
         return f"[Wikipedia search failed: {e}]"
- 
- 
+
+
 @tool
 def arxiv_search(query: str) -> str:
     """Search ArXiv for academic papers on AI music generation, music
@@ -188,8 +256,8 @@ def arxiv_search(query: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"[ArXiv search failed: {e}]"
- 
- 
+
+
 @tool
 def validate_json(json_string: str) -> str:
     """Validate and parse a JSON string. Returns 'VALID' if the JSON is
@@ -204,8 +272,8 @@ def validate_json(json_string: str) -> str:
         return "VALID: JSON is well-formed and parseable."
     except json.JSONDecodeError as e:
         return f"INVALID: {e}. Fix the JSON and call this tool again."
- 
- 
+
+
 def _run_agent_loop(
     llm,
     tools: list,
@@ -213,28 +281,27 @@ def _run_agent_loop(
     user_message: str,
     max_tool_calls: int = 6,
     max_retries: int = 2,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[dict], int, int]:
     """
     Run a tool-calling agent loop with retry logic for LLM failures.
- 
-    Args:
-        max_retries: Number of times to retry on LLM invocation failure
-                     (rate-limits, timeouts, transient errors).
- 
+
     Returns:
-        (final_text_output, list_of_tool_calls_made)
+        (final_text_output, list_of_tool_calls_made, input_tokens, output_tokens)
+
+    FIX: Token counts now reflect the full message history, not just the
+    initial prompt, to prevent systematic undercounting.
     """
     llm_with_tools = llm.bind_tools(tools)
     tool_map = {t.name: t for t in tools}
- 
+
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_message),
     ]
- 
+
     tools_called_log = []
     call_count = 0
- 
+
     def _invoke_with_retry(msgs):
         """Invoke the LLM with exponential backoff on transient failures."""
         for attempt in range(max_retries + 1):
@@ -250,22 +317,23 @@ def _run_agent_loop(
                     wait = 2 ** attempt  # 1s, 2s
                     time.sleep(wait)
                     continue
-                raise  # Non-transient or exhausted retries
- 
+                raise
+
     while call_count < max_tool_calls:
         response = _invoke_with_retry(messages)
-        messages.append(response)  # append AIMessage to history
- 
-        # If the LLM made no tool calls, it's done — return its text
+        messages.append(response)
+
         if not response.tool_calls:
-            return response.content, tools_called_log
- 
-        # Execute each tool the LLM requested
+            # Count tokens across the full conversation history
+            input_tokens = _count_message_tokens(messages[:-1])  # everything before final response
+            output_tokens = _count_tokens(str(response.content))
+            return response.content, tools_called_log, input_tokens, output_tokens
+
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            tool_id   = tool_call["id"]
- 
+            tool_id = tool_call["id"]
+
             tool_fn = tool_map.get(tool_name)
             if tool_fn is None:
                 tool_result = f"[Error: tool '{tool_name}' not found]"
@@ -274,52 +342,70 @@ def _run_agent_loop(
                     tool_result = tool_fn.invoke(tool_args)
                 except Exception as e:
                     tool_result = f"[Tool execution error: {e}]"
- 
+
             tools_called_log.append({
                 "tool": tool_name,
                 "args": tool_args,
                 "result_preview": str(tool_result)[:400],
             })
- 
-            # Feed the tool result back to the LLM as a ToolMessage
+
             messages.append(
                 ToolMessage(
                     content=str(tool_result),
                     tool_call_id=tool_id,
                 )
             )
- 
+
         call_count += 1
- 
-    # Safety: hit max_tool_calls — ask LLM to wrap up with what it has
+
+    # Safety: hit max_tool_calls — ask LLM to wrap up
     messages.append(
         HumanMessage(content="You have used the maximum number of tool calls. "
                              "Synthesise your findings now and produce your final output.")
     )
     final = _invoke_with_retry(messages)
-    return final.content, tools_called_log
+    input_tokens = _count_message_tokens(messages)
+    output_tokens = _count_tokens(str(final.content))
+    return final.content, tools_called_log, input_tokens, output_tokens
 
 
 # ---------------------------------------------------------------------------
 # Trace persistence
 # ---------------------------------------------------------------------------
 
-
 PERSIST_TRACES = os.environ.get("PERSIST_TRACES", "true").lower() != "false"
 
+
 def _persist_trace(session_id: str, trace_entry: dict) -> None:
-    """Append a trace entry to the session's JSON file on disk."""
+    """Atomic append to trace file using write-to-temp-then-rename pattern."""
     if not PERSIST_TRACES:
         return
+    
     path = TRACES_DIR / f"{session_id}.json"
-    existing: list[dict] = []
-    if path.exists():
+    temp_path = TRACES_DIR / f".tmp.{session_id}.{uuid.uuid4().hex}.json"
+    
+    try:
+        # Read existing
+        existing = []
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (json.JSONDecodeError, Exception):
+                existing = []
+        
+        existing.append(trace_entry)
+        
+        # Atomic write
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, default=str)
+        temp_path.rename(path)
+    except Exception:
+        # Cleanup temp file if exists
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, Exception):
-            existing = []
-    existing.append(trace_entry)
-    path.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
+            temp_path.unlink(missing_ok=True)
+        except:
+            pass
 
 
 def load_trace(session_id: str) -> list[dict]:
@@ -337,16 +423,11 @@ def load_trace(session_id: str) -> list[dict]:
 # Output quality assessment
 # ---------------------------------------------------------------------------
 
-
 def _assess_quality(output: str) -> str:
-    """Heuristic quality assessment of an agent's output.
-
-    Evaluates specificity, not just absence of errors.
-    """
+    """Heuristic quality assessment of an agent's output."""
     if not output or output.strip() == "":
         return "tool_failed"
 
-    # Check for explicit failure markers
     failure_markers = [
         "[duckduckgo returned no results]",
         "[duckduckgo search failed",
@@ -358,7 +439,6 @@ def _assess_quality(output: str) -> str:
     if any(m in output.lower() for m in failure_markers):
         return "tool_failed"
 
-    # Check for vagueness: generic filler, overly broad ranges, lack of specifics
     vague_markers = [
         "good vibes", "nice music", "pleasant sound", "general music",
         "various genres", "multiple styles", "different types",
@@ -366,14 +446,12 @@ def _assess_quality(output: str) -> str:
     ]
     vague_count = sum(1 for m in vague_markers if m.lower() in output.lower())
 
-    # Check for specificity indicators
     specific_markers = [
         "bpm", "key:", "minor", "major", "instrumentation",
         "genre:", "mood", "reference", "track",
     ]
     specific_count = sum(1 for m in specific_markers if m.lower() in output.lower())
 
-    # Short outputs with few specifics are vague
     if len(output) < 200 and specific_count < 2:
         return "vague"
     if vague_count >= 2:
@@ -384,17 +462,16 @@ def _assess_quality(output: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Agent implementations
+# FIX: All agent functions now return dict updates, not mutated state.
 # ---------------------------------------------------------------------------
 
-
-def _run_music_researcher(state) -> dict:
-    """Music Researcher: autonomously searches for genre, mood, cultural
-    context, and reference tracks using bound tools."""
+def _run_music_researcher(state: GraphState) -> dict:
+    """Music Researcher: researches genre, mood, cultural context, reference tracks."""
     query = state["query"]
-    llm   = _get_llm(temperature=0.4)
- 
+    llm = _get_llm(temperature=0.4)
+
     system_prompt = """You are a Music Research specialist with access to web search tools.
- 
+
 Your goal: research the music query and return a structured report covering:
 - genre: primary genre and relevant subgenres
 - mood_descriptors: 3-5 specific emotional/atmospheric words (not generic like "nice")
@@ -402,48 +479,43 @@ Your goal: research the music query and return a structured report covering:
 - reference_tracks: 2-3 specific real artists or tracks that exemplify the style
 - avoid_list: what this music should NOT sound like (if relevant)
 - regional_notes: geographic or cultural specificity (if relevant)
- 
+
 HOW TO USE YOUR TOOLS:
 - Call duckduckgo_search first with a specific query like "{query} music genre mood style"
 - If DuckDuckGo returns no results or fails, call wikipedia_search as a fallback
 - Use multiple searches if your first result is too vague
 - Stop searching once you have enough specific information
- 
+
 RULES:
 - Never fabricate reference tracks. If unsure, say so.
 - If tools return no results, use your training knowledge and flag: "confidence: low"
 - A short, accurate answer beats a long, vague one."""
- 
+
     user_message = f"Research this music query: {query}"
- 
+
     if state.get("contradiction_detected"):
         user_message += (
             f"\n\nDEFEND YOUR POSITION: A contradiction was detected:\n"
             f"{state['contradiction_detected']}\n"
             f"Search for stronger evidence to support or update your previous findings."
         )
- 
-    # Count input tokens (approximate — full message history not known upfront)
-    input_tokens = _count_tokens(system_prompt + user_message)
+
     t0 = time.time()
- 
-    output_text, tools_called_log = _run_agent_loop(
+    output_text, tools_called_log, input_tokens, output_tokens = _run_agent_loop(
         llm=llm,
         tools=[duckduckgo_search, wikipedia_search],
         system_prompt=system_prompt,
         user_message=user_message,
         max_tool_calls=4,
     )
- 
+
     latency_ms = int((time.time() - t0) * 1000)
-    output_tokens = _count_tokens(output_text)
     quality = _assess_quality(output_text)
- 
     tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
     tool_output_previews = [t["result_preview"] for t in tools_called_log]
- 
+
     trace_entry = {
-        "step": len(state["execution_trace"]) + 1,
+        "step": len(state.get("execution_trace", [])) + 1,
         "agent": "music_researcher",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "latency_ms": latency_ms,
@@ -455,81 +527,81 @@ RULES:
         "tokens_used": input_tokens + output_tokens,
     }
     _persist_trace(state["session_id"], trace_entry)
- 
+
     return {
-        "output": output_text,
-        "trace": trace_entry,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "quality": quality,
+        "researcher_output": output_text,
+        "last_output_quality": quality,
+        "agents_called": state.get("agents_called", []) + ["music_researcher"],
+        "agent_call_counts": {
+            **state.get("agent_call_counts", {}),
+            "music_researcher": state.get("agent_call_counts", {}).get("music_researcher", 0) + 1,
+        },
+        "execution_trace": state.get("execution_trace", []) + [trace_entry],
+        "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+        "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
     }
- 
- 
-def _run_trend_analyst(state) -> dict:
-    """Trend Analyst: autonomously searches for BPM, key, instrumentation,
-    and AI music generation trends using bound tools."""
-    query        = state["query"]
+
+
+def _run_trend_analyst(state: GraphState) -> dict:
+    """Trend Analyst: finds BPM, key, instrumentation, and AI music generation trends."""
+    query = state["query"]
     prior_research = state.get("researcher_output", "")
-    llm          = _get_llm(temperature=0.3)
- 
+    llm = _get_llm(temperature=0.3)
+
     system_prompt = """You are an AI Music Trend Analyst with access to research tools.
- 
+
 Your goal: find technical music parameters and current market data for the query.
- 
+
 REQUIRED output fields:
 - bpm_range: specific min/max BPM (e.g. 70-90, NOT "slow")
 - key_and_mode: likely musical key(s) and mode (major/minor/modal)
 - time_signature: most common for this style
 - core_instrumentation: 4-6 specific instruments or sound types
 - energy_contour: how energy changes over time (builds, drops, steady)
- 
+
 OPTIONAL fields (only if relevant):
 - ai_generation_notes: findings from ArXiv on generating this style
 - market_trends: what is performing well in this niche right now
- 
+
 HOW TO USE YOUR TOOLS:
 - Call arxiv_search for academic research on AI music generation for this style
 - Call duckduckgo_search for current BPM data, production techniques, market trends
 - Use specific queries like "{query} BPM tempo key instrumentation music production"
 - If one source fails, try the other
- 
+
 RULES:
 - A range of 60-140 BPM is useless. Be specific — e.g. 85-95 BPM.
 - If you cannot find a specific value, estimate from genre knowledge and flag it
 - Do not repeat information already in the prior research context below"""
- 
+
     user_message = f"Query: {query}"
     if prior_research:
         user_message += f"\n\nPrior research context (do not repeat this):\n{prior_research[:1500]}"
     user_message += "\n\nFind the technical parameters for this music query."
- 
+
     if state.get("contradiction_detected"):
         user_message += (
             f"\n\nDEFEND YOUR POSITION: A contradiction was detected:\n"
             f"{state['contradiction_detected']}\n"
             f"Search for stronger evidence to support or update your technical findings."
         )
- 
-    input_tokens = _count_tokens(system_prompt + user_message)
+
     t0 = time.time()
- 
-    output_text, tools_called_log = _run_agent_loop(
+    output_text, tools_called_log, input_tokens, output_tokens = _run_agent_loop(
         llm=llm,
         tools=[arxiv_search, duckduckgo_search],
         system_prompt=system_prompt,
         user_message=user_message,
         max_tool_calls=4,
     )
- 
+
     latency_ms = int((time.time() - t0) * 1000)
-    output_tokens = _count_tokens(output_text)
     quality = _assess_quality(output_text)
- 
     tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
     tool_output_previews = [t["result_preview"] for t in tools_called_log]
- 
+
     trace_entry = {
-        "step": len(state["execution_trace"]) + 1,
+        "step": len(state.get("execution_trace", [])) + 1,
         "agent": "trend_analyst",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "latency_ms": latency_ms,
@@ -541,28 +613,32 @@ RULES:
         "tokens_used": input_tokens + output_tokens,
     }
     _persist_trace(state["session_id"], trace_entry)
- 
+
     return {
-        "output": output_text,
-        "trace": trace_entry,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "quality": quality,
+        "analyst_output": output_text,
+        "last_output_quality": quality,
+        "agents_called": state.get("agents_called", []) + ["trend_analyst"],
+        "agent_call_counts": {
+            **state.get("agent_call_counts", {}),
+            "trend_analyst": state.get("agent_call_counts", {}).get("trend_analyst", 0) + 1,
+        },
+        "execution_trace": state.get("execution_trace", []) + [trace_entry],
+        "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+        "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
     }
- 
- 
-def _run_prompt_strategist(state) -> dict:
-    """Prompt Strategist: autonomously synthesises research into a validated
-    JSON brief, using the validate_json tool to check its own output."""
-    query          = state["query"]
+
+
+def _run_prompt_strategist(state: GraphState) -> dict:
+    """Prompt Strategist: synthesises research into a validated JSON brief."""
+    query = state["query"]
     researcher_out = state.get("researcher_output", "")
-    analyst_out    = state.get("analyst_output", "")
-    llm            = _get_llm(temperature=0.2)
- 
+    analyst_out = state.get("analyst_output", "")
+    llm = _get_llm(temperature=0.2)
+
     system_prompt = """You are a Music Prompt Strategist with access to a JSON validation tool.
- 
+
 Your job: synthesise all research into a validated JSON music generation brief.
- 
+
 STEP 1 — Write the JSON brief matching this exact schema:
 {
   "use_case": str,
@@ -580,17 +656,17 @@ STEP 1 — Write the JSON brief matching this exact schema:
   "confidence_score": float,
   "gaps": [str]
 }
- 
+
 STEP 2 — Call validate_json with your JSON string to check it is valid.
   - If VALID: your task is complete. Output ONLY the JSON — no extra text.
   - If INVALID: fix the errors and call validate_json again until it passes.
- 
+
 CONTRADICTION RULE:
   If the researcher and analyst data directly contradict each other on a key
   parameter (e.g. BPM 60 vs BPM 170), do NOT produce the full JSON.
   Instead output exactly: {"contradiction": "clear explanation of the conflict"}
   Do NOT call validate_json in this case.
- 
+
 CONSTRAINT EXTRACTION:
    If the original query contains explicit constraints (e.g. "no lyrics",
    "no vocals", "under 2 minutes", "avoid piano"), you MUST capture them:
@@ -604,7 +680,7 @@ RULES:
   - Never omit the gaps field. Empty list [] is fine if everything is covered.
   - A brief with honest gaps beats one that hides them.
   - Output ONLY the final JSON — no markdown fences, no explanation."""
- 
+
     context_parts = [f"Original query: {query}"]
     if researcher_out:
         context_parts.append(f"Music Researcher findings:\n{researcher_out[:2000]}")
@@ -615,27 +691,23 @@ RULES:
             "No prior agent research available. "
             "Use your training knowledge and set confidence_score low."
         )
- 
+
     user_message = "\n\n".join(context_parts) + "\n\nProduce the validated JSON brief now."
- 
-    input_tokens = _count_tokens(system_prompt + user_message)
+
     t0 = time.time()
- 
-    output_text, tools_called_log = _run_agent_loop(
+    output_text, tools_called_log, input_tokens, output_tokens = _run_agent_loop(
         llm=llm,
         tools=[validate_json],
         system_prompt=system_prompt,
         user_message=user_message,
-        max_tool_calls=4,  # up to 2 validation attempts
+        max_tool_calls=4,
     )
- 
+
     latency_ms = int((time.time() - t0) * 1000)
-    output_tokens = _count_tokens(output_text)
- 
-    # Parse the final JSON output
     tool_names = list(dict.fromkeys(t["tool"] for t in tools_called_log))
     tool_output_previews = [t["result_preview"] for t in tools_called_log]
- 
+
+    # Parse the final JSON output
     parsed_json = None
     validation_status = "success"
     try:
@@ -646,20 +718,19 @@ RULES:
         parsed_json = json.loads(clean)
     except json.JSONDecodeError as e:
         validation_status = f"final parse failed: {e}"
-        # Last-resort extraction
         try:
             start = output_text.find("{")
-            end   = output_text.rfind("}") + 1
+            end = output_text.rfind("}") + 1
             if start != -1 and end > start:
                 parsed_json = json.loads(output_text[start:end])
                 validation_status = "success (extracted)"
         except Exception:
             pass
- 
+
     quality = "good" if parsed_json else "tool_failed"
- 
+
     trace_entry = {
-        "step": len(state["execution_trace"]) + 1,
+        "step": len(state.get("execution_trace", [])) + 1,
         "agent": "prompt_strategist",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "latency_ms": latency_ms,
@@ -672,21 +743,35 @@ RULES:
         "validation_status": validation_status,
     }
     _persist_trace(state["session_id"], trace_entry)
- 
-    return {
-        "output": output_text,
-        "parsed_json": parsed_json,
-        "trace": trace_entry,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "quality": quality,
+
+    # Determine what to update based on strategist output
+    updates = {
+        "strategist_output": output_text,
+        "last_output_quality": quality,
+        "agents_called": state.get("agents_called", []) + ["prompt_strategist"],
+        "agent_call_counts": {
+            **state.get("agent_call_counts", {}),
+            "prompt_strategist": state.get("agent_call_counts", {}).get("prompt_strategist", 0) + 1,
+        },
+        "execution_trace": state.get("execution_trace", []) + [trace_entry],
+        "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+        "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
     }
+
+    if parsed_json:
+        if "contradiction" in parsed_json:
+            updates["contradiction_detected"] = parsed_json["contradiction"]
+            updates["strategist_output"] = ""  # Clear so supervisor doesn't finish
+        else:
+            updates["final_answer"] = parsed_json
+            updates["contradiction_detected"] = ""
+
+    return updates
 
 
 # ---------------------------------------------------------------------------
 # Supervisor reasoning
 # ---------------------------------------------------------------------------
-
 
 def _build_supervisor_prompt(state: GraphState) -> str:
     """Build the supervisor system prompt with current state injected."""
@@ -694,37 +779,56 @@ def _build_supervisor_prompt(state: GraphState) -> str:
     call_counts = state.get("agent_call_counts", {})
     last_quality = state.get("last_output_quality", "none")
 
-    # Build concise state summary
+    # FIX: Increased truncation from 300 to 600 chars so supervisor has
+    # enough context to assess output quality before routing.
     state_summary_parts = []
-    if state.get("researcher_output"):
-        state_summary_parts.append(f"Researcher output ({len(state['researcher_output'])} chars): {state['researcher_output'][:300]}...")
+    ro = state.get("researcher_output") or ""
+    if ro:
+        state_summary_parts.append(
+            f"Researcher output ({len(ro)} chars): "
+            f"{ro[:600]}..."
+        )
     else:
         state_summary_parts.append("Researcher output: NOT YET GATHERED")
-    if state.get("analyst_output"):
-        state_summary_parts.append(f"Analyst output ({len(state['analyst_output'])} chars): {state['analyst_output'][:300]}...")
+
+    ao = state.get("analyst_output") or ""
+    if ao:
+        state_summary_parts.append(
+            f"Analyst output ({len(ao)} chars): "
+            f"{ao[:600]}..."
+        )
     else:
         state_summary_parts.append("Analyst output: NOT YET GATHERED")
+
     if state.get("strategist_output"):
-        state_summary_parts.append(f"Strategist output: BRIEF PRODUCED")
+        state_summary_parts.append("Strategist output: BRIEF PRODUCED")
     else:
         state_summary_parts.append("Strategist output: NOT YET PRODUCED")
 
     state_str = "\n".join(state_summary_parts)
     call_history = ", ".join(agents_called) if agents_called else "none"
     call_count_str = json.dumps(call_counts) if call_counts else "{}"
-    budget_remaining = state.get("token_budget", 5000) - state.get("total_input_tokens", 0) - state.get("total_output_tokens", 0)
-    conflict_str = f"UNRESOLVED CONFLICT DETECTED: {state['contradiction_detected']}" if state.get("contradiction_detected") else "None"
+    budget_remaining = (
+        state.get("token_budget", 5000)
+        - state.get("total_input_tokens", 0)
+        - state.get("total_output_tokens", 0)
+    )
+    conflict_str = (
+        f"UNRESOLVED CONFLICT DETECTED: {state['contradiction_detected']}"
+        if state.get("contradiction_detected")
+        else "None"
+    )
 
-    return f"""You are the Supervisor of a Music Intelligence system. Your job is to produce a 
+    return f"""You are the Supervisor of a Music Intelligence system. Your job is to produce a
 complete, accurate music generation brief by coordinating specialized agents.
 
 You have three agents:
-- music_researcher: Researches genre characteristics, mood associations, cultural 
+- music_researcher: Researches genre characteristics, mood associations, cultural
   context, and reference tracks. Uses DuckDuckGo and Wikipedia.
-- trend_analyst: Finds technical music parameters (BPM, key, time signature, 
+- trend_analyst: Finds technical music parameters (BPM, key, time signature,
   instrumentation) and AI music generation trends. Uses ArXiv and DuckDuckGo.
-- prompt_strategist: Synthesizes all gathered context into a validated JSON music 
-  brief. Uses Python REPL for validation.
+- prompt_strategist: Synthesizes all gathered context into a validated JSON music
+  brief. Uses a JSON validator to ensure output correctness.
 
 YOUR DECISION PROCESS (run this every time before choosing):
 
@@ -736,7 +840,7 @@ Step 2 — Identify the most critical gap.
   Map each gap to the agent best suited to fill it.
 
 Step 3 — Check if you already have enough.
-  If the query is narrow and specific (e.g., "BPM for lo-fi hip hop"), 
+  If the query is narrow and specific (e.g., "BPM for lo-fi hip hop"),
   you may already have sufficient knowledge without calling any agent.
   Do not call agents for the sake of calling them. Consider the remaining token budget.
 
@@ -751,8 +855,8 @@ Step 5 — Decide.
   - CLARIFY: query has zero domain signals and proceeding would require fabrication.
     Return a structured question to the caller. Do not invoke any agent first.
 
-NOTE: These checks are guidelines, not a fixed sequence. Prioritize what matters 
-most for the current query. A narrow technical query may only need Step 3. 
+NOTE: These checks are guidelines, not a fixed sequence. Prioritize what matters
+most for the current query. A narrow technical query may only need Step 3.
 A failing agent may make Step 4 the only thing that matters.
 
 IMPORTANT CONSTRAINTS:
@@ -764,10 +868,15 @@ IMPORTANT CONSTRAINTS:
   "Enough context" means: at least mood/genre OR at least technical parameters.
   A brief with some unknowns is better than never finishing.
 - If a brief has already been produced (strategist output exists), return FINISH.
-- If all agents have been called and the brief is still incomplete, 
+- If all agents have been called and the brief is still incomplete,
   call prompt_strategist with instruction to note gaps explicitly.
-- **DEBATE PROTOCOL**: If there are Unresolved Conflicts (a contradiction detected by the strategist), you MUST route to either `music_researcher` or `trend_analyst` to give them a chance to defend their position. Do not proceed to `FINISH` until they have been called to defend.
-- **COST AWARENESS**: Your remaining token budget is {budget_remaining} tokens. `trend_analyst` usually takes ~1500 tokens, `music_researcher` ~1000 tokens. If budget is low, prioritize `prompt_strategist` or `FINISH`.
+- **DEBATE PROTOCOL**: If there are Unresolved Conflicts (a contradiction detected by
+  the strategist), you MUST route to either music_researcher or trend_analyst to give
+  them a chance to defend their position. Do not proceed to FINISH until they have
+  been called to defend.
+- **COST AWARENESS**: Your remaining token budget is {budget_remaining} tokens.
+  trend_analyst uses ~1500 tokens, music_researcher ~1000 tokens.
+  If budget is low, prioritize prompt_strategist or FINISH.
 
 Current query: {state['query']}
 Unresolved Conflicts: {conflict_str}
@@ -789,47 +898,50 @@ RESPOND WITH EXACTLY THIS JSON STRUCTURE (No extra text, no markdown fences):
 }}"""
 
 
-def _run_supervisor(state: GraphState) -> str:
-    """Run the supervisor to decide the next agent. Returns one of the agent names, FINISH, or CLARIFY."""
+def _run_supervisor(state: GraphState) -> tuple[str, dict, int, int]:
+    """
+    Run the supervisor to decide the next agent.
+
+    Returns:
+        (decision: str, reasoning: dict, input_tokens: int, output_tokens: int)
+
+    FIX: Returns token counts and decision separately instead of mutating state.
+    FIX: Budget cutoff consistently returns uppercase "FINISH".
+    """
     llm = _get_llm(temperature=0.1)
     prompt = _build_supervisor_prompt(state)
     input_tokens = _count_tokens(prompt)
+
+    # Check budget BEFORE making the LLM call
+    budget_used = state.get("total_input_tokens", 0) + state.get("total_output_tokens", 0)
+    if budget_used + input_tokens >= state.get("token_budget", 5000):
+        # Budget exhausted — FIX: return uppercase FINISH, not "finish"
+        if state.get("strategist_output"):
+            return "FINISH", {"reasoning": "Token budget exhausted, brief already produced."}, input_tokens, 0
+        else:
+            return "prompt_strategist", {"reasoning": "Token budget exhausted, forcing synthesis."}, input_tokens, 0
 
     response = llm.invoke([HumanMessage(content=prompt)])
     decision_raw = response.content.strip()
     output_tokens = _count_tokens(decision_raw)
 
-    # Update token counters
-    state["total_input_tokens"] = state.get("total_input_tokens", 0) + input_tokens
-    state["total_output_tokens"] = state.get("total_output_tokens", 0) + output_tokens
-
-    # Enforce strict token budget cut-off
-    budget_used = state.get("total_input_tokens", 0) + state.get("total_output_tokens", 0)
-    if budget_used >= state.get("token_budget", 5000):
-        # We are out of budget
-        if state.get("strategist_output"):
-            return "finish"  # Will be mapped to FINISH below
-        else:
-            return "prompt_strategist"
-
     # Parse decision from JSON
-    clean = decision_raw
-    if clean.startswith("```"):
-        lines = clean.split("\n")
-        clean = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    
+    clean = decision_raw.strip()
+    start = clean.find("{")
+    end = clean.rfind("}")
+    if start != -1 and end > start:
+        clean = clean[start:end+1]
+
     parsed = {}
     try:
         parsed = json.loads(clean)
         decision = parsed.get("decision", "").strip().lower()
-        state["supervisor_reasoning"] = parsed
     except json.JSONDecodeError:
         decision = decision_raw.strip().lower()
-        state["supervisor_reasoning"] = {"reasoning": "Failed to parse JSON", "decision": decision}
+        parsed = {"reasoning": "Failed to parse supervisor JSON", "decision": decision}
 
     decision = decision.replace("*", "").replace("`", "").strip()
 
-    # Handle multi-word responses by finding the valid token
     valid_decisions = {"music_researcher", "trend_analyst", "prompt_strategist", "finish", "clarify"}
     if decision not in valid_decisions:
         for token in valid_decisions:
@@ -837,7 +949,7 @@ def _run_supervisor(state: GraphState) -> str:
                 decision = token
                 break
         else:
-            # Default: if strategist output exists, finish; otherwise call strategist
+            # Heuristic fallback
             if state.get("strategist_output"):
                 decision = "finish"
             elif state.get("researcher_output") or state.get("analyst_output"):
@@ -846,135 +958,97 @@ def _run_supervisor(state: GraphState) -> str:
                 decision = "music_researcher"
 
     if decision == "finish":
-        return "FINISH"
+        return "FINISH", parsed, input_tokens, output_tokens
     if decision == "clarify":
-        return "CLARIFY"
-    return decision
+        return "CLARIFY", parsed, input_tokens, output_tokens
+    return decision, parsed, input_tokens, output_tokens
 
 
 # ---------------------------------------------------------------------------
 # LangGraph node functions
+# FIX: All node functions return dict updates, not mutated GraphState objects.
 # ---------------------------------------------------------------------------
 
-
-def supervisor_node(state: GraphState) -> GraphState:
+def supervisor_node(state: GraphState) -> dict:
     """Supervisor: reason about state and decide next step."""
-    if state.get("event_callback"):
-        state["event_callback"]("supervisor_start", {"iteration": state.get("iteration", 0) + 1})
-    state["iteration"] = state.get("iteration", 0) + 1
+    _emit("supervisor_start", {"iteration": state.get("iteration", 0) + 1})
+
+    new_iteration = state.get("iteration", 0) + 1
 
     # Safety: max iterations
-    if state["iteration"] > state.get("max_iterations", 10):
-        if state.get("strategist_output"):
-            state["supervisor_decision"] = "FINISH"
-        else:
-            # Force strategist
-            state["supervisor_decision"] = "prompt_strategist"
-        return state
+    if new_iteration > state.get("max_iterations", 10):
+        final_decision = "FINISH" if state.get("strategist_output") else "prompt_strategist"
+        return {"iteration": new_iteration, "supervisor_decision": final_decision}
 
-    decision = _run_supervisor(state)
+    decision, reasoning, input_tokens, output_tokens = _run_supervisor(state)
 
     # Enforce max retries per agent
     call_counts = state.get("agent_call_counts", {})
     if decision in AGENT_NAMES and call_counts.get(decision, 0) >= MAX_RETRIES_PER_AGENT:
-        # This agent has been called max times; pick an alternative
-        if not state.get("strategist_output"):
-            # If we have any context, go to strategist
-            if state.get("researcher_output") or state.get("analyst_output"):
-                decision = "prompt_strategist"
-                if call_counts.get("prompt_strategist", 0) >= MAX_RETRIES_PER_AGENT:
-                    decision = "FINISH"
-            else:
-                decision = "FINISH"
+        if state.get("researcher_output") or state.get("analyst_output"):
+            strategist_calls = call_counts.get("prompt_strategist", 0)
+            decision = "FINISH" if strategist_calls >= MAX_RETRIES_PER_AGENT else "prompt_strategist"
         else:
             decision = "FINISH"
 
-    state["supervisor_decision"] = decision
-
-    supervisor_reasoning = state.get("supervisor_reasoning", {})
     trace_entry = {
         "step": len(state.get("execution_trace", [])) + 1,
         "agent": "supervisor",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "decision": decision,
-        "reasoning": supervisor_reasoning.get("reasoning", "No reasoning provided"),
-        "identified_gaps": supervisor_reasoning.get("identified_gaps", []),
+        "reasoning": reasoning.get("reasoning", "No reasoning provided"),
+        "identified_gaps": reasoning.get("identified_gaps", []),
     }
-    state["execution_trace"] = state.get("execution_trace", []) + [trace_entry]
     _persist_trace(state["session_id"], trace_entry)
+    _emit("supervisor_end", {"decision": decision, "reasoning": reasoning})
 
-    if state.get("event_callback"):
-        state["event_callback"]("supervisor_end", {"decision": decision, "reasoning": supervisor_reasoning})
-    return state
+    return {
+        "iteration": new_iteration,
+        "supervisor_decision": decision,
+        "supervisor_reasoning": reasoning,
+        "execution_trace": state.get("execution_trace", []) + [trace_entry],
+        "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+        "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
+    }
 
 
-def researcher_node(state: GraphState) -> GraphState:
+def researcher_node(state: GraphState) -> dict:
     """Execute the Music Researcher agent."""
-    if state.get("event_callback"):
-        state["event_callback"]("agent_start", {"agent": "music_researcher"})
-    result = _run_music_researcher(state)
-    state["researcher_output"] = result["output"]
-    state["last_output_quality"] = result["quality"]
-    state["agents_called"] = state.get("agents_called", []) + ["music_researcher"]
-    state["agent_call_counts"] = state.get("agent_call_counts", {})
-    state["agent_call_counts"]["music_researcher"] = state["agent_call_counts"].get("music_researcher", 0) + 1
-    state["execution_trace"] = state.get("execution_trace", []) + [result["trace"]]
-    state["total_input_tokens"] = state.get("total_input_tokens", 0) + result["input_tokens"]
-    state["total_output_tokens"] = state.get("total_output_tokens", 0) + result["output_tokens"]
-    if state.get("event_callback"):
-        state["event_callback"]("agent_end", {"agent": "music_researcher", "quality": result["quality"], "trace": result["trace"]})
-    return state
+    _emit("agent_start", {"agent": "music_researcher"})
+    updates = _run_music_researcher(state)
+    _emit("agent_end", {
+        "agent": "music_researcher",
+        "quality": updates.get("last_output_quality"),
+    })
+    return updates
 
 
-def analyst_node(state: GraphState) -> GraphState:
+def analyst_node(state: GraphState) -> dict:
     """Execute the Trend Analyst agent."""
-    if state.get("event_callback"):
-        state["event_callback"]("agent_start", {"agent": "trend_analyst"})
-    result = _run_trend_analyst(state)
-    state["analyst_output"] = result["output"]
-    state["last_output_quality"] = result["quality"]
-    state["agents_called"] = state.get("agents_called", []) + ["trend_analyst"]
-    state["agent_call_counts"] = state.get("agent_call_counts", {})
-    state["agent_call_counts"]["trend_analyst"] = state["agent_call_counts"].get("trend_analyst", 0) + 1
-    state["execution_trace"] = state.get("execution_trace", []) + [result["trace"]]
-    state["total_input_tokens"] = state.get("total_input_tokens", 0) + result["input_tokens"]
-    state["total_output_tokens"] = state.get("total_output_tokens", 0) + result["output_tokens"]
-    if state.get("event_callback"):
-        state["event_callback"]("agent_end", {"agent": "trend_analyst", "quality": result["quality"], "trace": result["trace"]})
-    return state
+    _emit("agent_start", {"agent": "trend_analyst"})
+    updates = _run_trend_analyst(state)
+    _emit("agent_end", {
+        "agent": "trend_analyst",
+        "quality": updates.get("last_output_quality"),
+    })
+    return updates
 
 
-def strategist_node(state: GraphState) -> GraphState:
+def strategist_node(state: GraphState) -> dict:
     """Execute the Prompt Strategist agent."""
-    if state.get("event_callback"):
-        state["event_callback"]("agent_start", {"agent": "prompt_strategist"})
-    result = _run_prompt_strategist(state)
-    state["strategist_output"] = result["output"]
-    state["last_output_quality"] = result["quality"]
-    state["agents_called"] = state.get("agents_called", []) + ["prompt_strategist"]
-    state["agent_call_counts"] = state.get("agent_call_counts", {})
-    state["agent_call_counts"]["prompt_strategist"] = state["agent_call_counts"].get("prompt_strategist", 0) + 1
-    state["execution_trace"] = state.get("execution_trace", []) + [result["trace"]]
-    state["total_input_tokens"] = state.get("total_input_tokens", 0) + result["input_tokens"]
-    state["total_output_tokens"] = state.get("total_output_tokens", 0) + result["output_tokens"]
-
-    if result.get("parsed_json"):
-        if "contradiction" in result["parsed_json"]:
-            state["contradiction_detected"] = result["parsed_json"]["contradiction"]
-            state["strategist_output"] = ""  # Clear so supervisor doesn't finish
-        else:
-            state["final_answer"] = result["parsed_json"]
-            state["contradiction_detected"] = ""
-
-    if state.get("event_callback"):
-        state["event_callback"]("agent_end", {"agent": "prompt_strategist", "quality": result["quality"], "trace": result["trace"], "contradiction": state.get("contradiction_detected")})
-    return state
+    _emit("agent_start", {"agent": "prompt_strategist"})
+    updates = _run_prompt_strategist(state)
+    _emit("agent_end", {
+        "agent": "prompt_strategist",
+        "quality": updates.get("last_output_quality"),
+        "contradiction": updates.get("contradiction_detected"),
+    })
+    return updates
 
 
 # ---------------------------------------------------------------------------
 # Routing function (used by conditional edges)
 # ---------------------------------------------------------------------------
-
 
 def route_supervisor_decision(state: GraphState) -> str:
     """Route based on the supervisor's decision."""
@@ -982,7 +1056,7 @@ def route_supervisor_decision(state: GraphState) -> str:
     if decision == "FINISH":
         return "FINISH"
     if decision == "CLARIFY":
-        return "FINISH"  # For now, CLARIFY exits the graph; the API layer handles it
+        return "CLARIFY"
     if decision in AGENT_NAMES:
         return decision
     return "FINISH"
@@ -992,7 +1066,6 @@ def route_supervisor_decision(state: GraphState) -> str:
 # Build the graph
 # ---------------------------------------------------------------------------
 
-
 def build_graph() -> StateGraph:
     """Construct the LangGraph with supervisor-driven conditional routing.
 
@@ -1000,16 +1073,13 @@ def build_graph() -> StateGraph:
     """
     graph = StateGraph(GraphState)
 
-    # Add nodes
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("music_researcher", researcher_node)
     graph.add_node("trend_analyst", analyst_node)
     graph.add_node("prompt_strategist", strategist_node)
 
-    # Entry point: always start with the supervisor
     graph.set_entry_point("supervisor")
 
-    # Supervisor routes to any agent or END — THIS IS THE ONLY ROUTING LOGIC
     graph.add_conditional_edges(
         "supervisor",
         route_supervisor_decision,
@@ -1022,7 +1092,6 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Each agent returns to the supervisor for the next decision
     graph.add_edge("music_researcher", "supervisor")
     graph.add_edge("trend_analyst", "supervisor")
     graph.add_edge("prompt_strategist", "supervisor")
@@ -1031,47 +1100,54 @@ def build_graph() -> StateGraph:
 
 
 def compile_graph():
-    """Build and compile the graph, ready to invoke."""
-    graph = build_graph()
-    return graph.compile()
+    """Build and compile the graph."""
+    return build_graph().compile()
 
 
 # ---------------------------------------------------------------------------
 # Main execution function
 # ---------------------------------------------------------------------------
 
-
 _COMPILED_GRAPH = compile_graph()
 
-def execute_query(query: str, session_id: str | None = None, max_iterations: int = 10, token_budget: int = 5000, event_callback: Any = None) -> dict:
+
+def execute_query(
+    query: str,
+    session_id: str | None = None,
+    max_iterations: int = 10,
+    token_budget: int = 5000,
+    event_callback: Any = None,
+) -> dict:
     """Run the full Music Intelligence pipeline for a query.
 
-    Returns a dict with: session_id, final_answer, execution_trace,
-    token_usage, iterations, agents_called, skipped_agents.
+    event_callback is injected via thread-local — NOT stored in graph state —
+    to keep GraphState serialisable for future checkpointer compatibility.
     """
-    state = _default_state(query, session_id, max_iterations, token_budget, event_callback)
+    # Inject callback into thread-local for this execution
+    _set_callback(event_callback)
 
-    # Run the graph
-    final_state = _COMPILED_GRAPH.invoke(state)
+    try:
+        state = _default_state(query, session_id, max_iterations, token_budget)
+        final_state = _COMPILED_GRAPH.invoke(state)
+    finally:
+        _set_callback(None)  # Always clean up
 
-    # Determine skipped agents
     called_unique = list(dict.fromkeys(final_state.get("agents_called", [])))
     skipped = [a for a in AGENT_NAMES if a not in called_unique]
 
-    # Build final answer — if strategist wasn't called, produce a minimal brief
     final_answer = final_state.get("final_answer", {})
     if not final_answer:
-        # No brief was produced — the supervisor determined existing info suffices
-        # or the query was a CLARIFY case
         decision = final_state.get("supervisor_decision", "")
         if decision == "CLARIFY":
             final_answer = {
                 "status": "clarification_needed",
-                "message": "The query lacks sufficient domain signals. Please provide more context about genre, mood, use case, or target audience.",
+                "message": (
+                    "The query lacks sufficient domain signals. Please provide more "
+                    "context about genre, mood, use case, or target audience."
+                ),
                 "confidence_score": 0.0,
             }
         else:
-            # Produce a minimal answer from whatever we have
             final_answer = {
                 "status": "partial",
                 "available_data": {},
@@ -1082,11 +1158,9 @@ def execute_query(query: str, session_id: str | None = None, max_iterations: int
             if final_state.get("analyst_output"):
                 final_answer["available_data"]["analysis"] = final_state["analyst_output"][:500]
 
-    # Cost estimation (Groq pricing approximation for llama-3.3-70b)
+    # Groq llama-3.3-70b pricing: ~$0.59/M input, ~$0.79/M output
     input_tokens = final_state.get("total_input_tokens", 0)
     output_tokens = final_state.get("total_output_tokens", 0)
-    total_tokens = input_tokens + output_tokens
-    # Groq llama-3.3-70b: ~$0.59/M input, ~$0.79/M output
     estimated_cost = (input_tokens * 0.59 / 1_000_000) + (output_tokens * 0.79 / 1_000_000)
 
     return {
@@ -1096,7 +1170,7 @@ def execute_query(query: str, session_id: str | None = None, max_iterations: int
         "token_usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "total": total_tokens,
+            "total": input_tokens + output_tokens,
             "estimated_cost_usd": round(estimated_cost, 6),
         },
         "iterations": final_state.get("iteration", 0),
