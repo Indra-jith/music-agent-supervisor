@@ -1,71 +1,238 @@
-# Music Agent Supervisor <br/>
+# Music Agent Supervisor
 
-Music Agent Supervisor is a non-deterministic, multi-agent AI system designed to generate highly specific, technically accurate **Music Generation Briefs**. Powered by **FastAPI** and **LangGraph**, it coordinates a team of specialized AI agents to research, debate, and synthesize validated JSON music briefs from natural language queries (e.g., *"futuristic luxury EV brand ad"*).
+A **non-deterministic, multi-agent AI system** that generates structured, technically accurate Music Generation Briefs from natural language queries. Powered by **FastAPI** and **LangGraph**, a Supervisor node reasons about state gaps in real time and dynamically routes between three specialist agents — no hardcoded pipeline, no fixed sequence.
+
+> *"futuristic luxury EV brand ad"* → structured JSON brief with BPM range, key, instrumentation, mood tags, reference tracks, and confidence score. In seconds.
 
 ---
 
-## ⚡ Quick Start
+## Live Demo
 
-You can immediately test the live API via `curl`:
+**API (Swagger UI):** [https://music-agent-supervisor.onrender.com/docs](https://music-agent-supervisor.onrender.com/docs)
+
+**Frontend UI:** [https://music-agent-supervisor.onrender.com](https://music-agent-supervisor.onrender.com)
+
+**Health check:** [https://music-agent-supervisor.onrender.com/health](https://music-agent-supervisor.onrender.com/health)
+
+Try it immediately:
 
 ```bash
 curl -X POST https://music-agent-supervisor.onrender.com/v1/execute \
   -H "Content-Type: application/json" \
-  -d '{"query":"upbeat electronic ad for Nike","token_budget":3000}'
+  -d '{"query": "peak-hour techno set for a Berlin club", "token_budget": 5000}'
 ```
 
-Alternatively, visit the interactive Swagger UI and Frontend:
-[Live API Documentation & Sandbox](https://music-agent-supervisor.onrender.com/docs)
+---
+
+## System Architecture
+
+Instead of a rigid A → B → C pipeline, every request starts at the **Supervisor** — an LLM call that reads the current state, identifies gaps, and decides which agent to invoke next. Agents never call each other directly. Every transition goes back through the Supervisor.
+
+```
+          ┌─────────────────────────────┐
+          │         SUPERVISOR          │
+          │  Reasons about state gaps,  │
+          │  token budget, and routing  │
+          └──────┬────────┬─────────────┘
+                 │        │
+       ┌─────────▼─┐   ┌──▼──────────┐   ┌──────────────────┐
+       │  music_   │   │   trend_    │   │    prompt_       │
+       │ researcher│   │  analyst   │   │   strategist     │
+       │           │   │            │   │                  │
+       │ DuckDuckGo│   │ ArXiv      │   │ JSON validation  │
+       │ Wikipedia │   │ DuckDuckGo │   │ + synthesis      │
+       └─────────┬─┘   └──┬─────────┘   └──────────┬───────┘
+                 │        │                          │
+                 └────────┴──────────────────────────┘
+                          Returns to Supervisor
+```
+
+### The four nodes
+
+**Supervisor** — The orchestrator. Produces structured JSON reasoning (`identified_gaps`, `decision`, `expected_contribution`) before every routing choice. Tracks token budget and call counts to enforce cost-aware behaviour.
+
+**music_researcher** — Researches genre characteristics, mood associations, cultural context, and reference tracks using DuckDuckGo and Wikipedia. Falls back to Wikipedia when DuckDuckGo rate-limits.
+
+**trend_analyst** — Finds technical parameters: BPM range, musical key, time signature, instrumentation, and energy contour. Uses ArXiv for AI music generation research and DuckDuckGo for market data.
+
+**prompt_strategist** — Synthesises all gathered context into a validated JSON brief. Runs Python-based JSON validation internally to catch and repair malformed outputs before returning.
 
 ---
 
-## 🧠 System Architecture
+## The Debate Protocol
 
-At its core, Wubble departs from traditional, rigid LLM pipelines. Instead of sequential steps (Agent A -> Agent B -> Output), it uses a **dynamic, non-deterministic graph** supervised by a master orchestrator node.
+The system's architectural defence against silent hallucination.
 
-The graph consists of four main nodes:
+In multi-agent systems, agents pulling from different sources frequently produce contradictory outputs. Example: `music_researcher` establishes a Doom Metal track at 60 BPM; `trend_analyst` returns 170 BPM for "energetic pacing." A naive system silently blends these into an unplayable brief.
 
-1. **The Supervisor Node**
-   * The "brain" of the operation. It assesses the current context, the remaining token budget, and the user's query to decide the next best action dynamically.
-   * **Cost-Aware Routing:** Wubble is aware of its `token_budget`. If a query is simple or the budget drops too low, the Supervisor bypasses expensive web-searching agents and forces early synthesis, maximizing efficiency.
+**Wubble's approach:**
 
-2. **Music Researcher Agent**
-   * Computes cultural and stylistic context. Uses DuckDuckGo and Wikipedia to find associated genres, mood descriptors, and real-world reference tracks.
+1. `prompt_strategist` detects the conflict during synthesis
+2. Instead of producing the brief, it returns `{"contradiction": "explanation of the conflict"}`
+3. The Supervisor reads `contradiction_detected` in state and re-routes both agents
+4. Agents receive: *"DEFEND YOUR POSITION: A contradiction was detected. Provide stronger evidence or concede."*
+5. Agents cite sources, one concedes, `prompt_strategist` synthesises with the resolved data
 
-3. **Trend Analyst Agent**
-   * Computes technical parameters. Uses DuckDuckGo and ArXiv to pull data on min/max BPM, keys, time signatures, instrumentation, and energy contours.
-
-4. **Prompt Strategist Agent**
-   * Synthesizes all gathered intelligence into a validated JSON schema. It uses a Python REPL validator internally to auto-correct malformed JSON blobs before emitting them.
+See [`debate_proof.json`](./debate_proof.json) for a raw state dump of a live contradiction resolution cycle.
 
 ---
 
-## ⚔️ The Debate Protocol (Addressing Hallucinations)
+## Cost-Aware Routing
 
-Wubble's most powerful feature is its architectural defense against AI Hallucination: **The Debate Protocol**.
+Every request includes a `token_budget`. The Supervisor tracks cumulative token consumption (using `tiktoken` with `cl100k_base` encoding) after every agent call and injects the remaining budget into its reasoning prompt before each routing decision.
 
-In multi-agent systems, agents frequently pull from divergent sources resulting in contradictions. For example, the `Music Researcher` might establish a "Doom Metal" track should be 60 BPM, while the `Trend Analyst` pulling for "Upbeat pacing" locks onto 170 BPM.
+- If budget is sufficient: full pipeline
+- If budget is low: Supervisor skips expensive agents (`trend_analyst` ~1500 tokens, `music_researcher` ~1000 tokens) and routes directly to `prompt_strategist`
+- If budget is exhausted mid-run: graph terminates immediately
 
-In Wubble:
-1. The `Prompt Strategist` begins generating the JSON but detects a conflict.
-2. It interrupts compilation and returns a contradiction state.
-3. The `Supervisor` loops the query back to the disparate agents.
-4. The agents are issued a prompt injunction: **"DEFEND YOUR POSITION: A contradiction was detected... provide stronger evidence or concede."**
-5. The agents self-correct and one concedes. The system then safety finishes compiling the brief.
+The response always includes `skipped_agents` and `token_usage.estimated_cost_usd` for full transparency.
 
 ---
 
-## 🛠️ Tech Stack & Deployment
+## Endpoints
 
-- **Backend Context:** FastAPI, Uvicorn 
-- **LLM Orchestration:** LangGraph, Langchain
-- **Language Models:** Llama-3.3-70b-versatile via Groq API
-- **Deployment Strategy:** Platform Agnostic w/ Procfile tooling. Fully capable of running ephemerally without disk reliance (configurable `PERSIST_TRACES=false` environment variables for Render compatibility). 
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/execute` | Run a query through the supervisor pipeline |
+| `WS` | `/ws/execute` | Stream agent events in real time |
+| `GET` | `/v1/evaluate` | Run 5 concurrent stress tests |
+| `GET` | `/v1/trace/{session_id}` | Retrieve full execution trace from disk |
+| `GET` | `/health` | Service health + component status |
+| `GET` | `/docs` | Interactive Swagger UI |
 
-## 🌐 Endpoints Overview
+### Request schema (`POST /v1/execute`)
 
-- `POST /v1/execute` : Execute a generation query.
-- `GET /v1/health` (and `/health`) : System health check.
-- `GET /v1/trace/{session_id}` : Retrieve specific trace pathways on persistent disk models.
-- `GET /v1/evaluate` : A built-in concurrent suite of 5 stress-tests to test the routing resilience.
-- `WS /ws/execute` : Real-time Streaming WebSocket connection that publishes agent events as they happen for high-fidelity frontends.
+```json
+{
+  "query": "futuristic luxury EV brand ad targeting millennials",
+  "session_id": "optional-custom-id",
+  "token_budget": 5000,
+  "max_iterations": 10
+}
+```
+
+### Response schema
+
+```json
+{
+  "session_id": "abc-123",
+  "final_answer": {
+    "use_case": "luxury automotive advertisement",
+    "mood_tags": ["cinematic", "futuristic", "minimal", "warm"],
+    "genre": "Synth-Wave",
+    "bpm": { "min": 90, "max": 110 },
+    "key": "F# minor",
+    "time_signature": "4/4",
+    "instrumentation": ["synthesizer pads", "clean electric guitar", "sub bass", "brushed drums"],
+    "energy_level": "dynamic",
+    "duration_seconds": 60,
+    "reference_tracks": ["Tycho - Awake", "Com Truise - Galactic Melt"],
+    "generation_notes": "Avoid aggressive distortion. Emphasise space and restraint.",
+    "confidence_score": 0.82,
+    "gaps": []
+  },
+  "agents_called": ["music_researcher", "trend_analyst", "prompt_strategist"],
+  "skipped_agents": [],
+  "token_usage": {
+    "input_tokens": 3241,
+    "output_tokens": 812,
+    "total": 4053,
+    "estimated_cost_usd": 0.002554
+  },
+  "iterations": 4,
+  "execution_trace": [...]
+}
+```
+
+### WebSocket streaming (`WS /ws/execute`)
+
+Connect and send:
+```json
+{ "query": "Berlin techno", "token_budget": 5000 }
+```
+
+Receive a stream of events as they happen:
+```
+{"type": "supervisor_start", "iteration": 1}
+{"type": "supervisor_end", "decision": "trend_analyst", "reasoning": {...}}
+{"type": "agent_start", "agent": "trend_analyst"}
+{"type": "agent_end", "agent": "trend_analyst", "quality": "good"}
+{"type": "agent_start", "agent": "prompt_strategist"}
+{"type": "agent_end", "agent": "prompt_strategist", "quality": "good"}
+{"type": "final_answer", ...}
+```
+
+---
+
+## Running Locally
+
+**Prerequisites:** Python 3.10+, a free [Groq API key](https://console.groq.com)
+
+```bash
+git clone https://github.com/Indra-jith/music-agent-supervisor.git
+cd music-agent-supervisor
+pip install -r requirements.txt
+```
+
+Create a `.env` file:
+```
+GROQ_API_KEY=your_key_here
+PERSIST_TRACES=true
+```
+
+Start the server:
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs) to explore the API interactively.
+
+To enable file-based trace persistence (survives restarts):
+```
+PERSIST_TRACES=true
+```
+
+Traces are written to `/traces/{session_id}.json` after every agent call.
+
+---
+
+## Evaluation
+
+Run the built-in stress test suite (5 queries, concurrent):
+
+```bash
+curl https://music-agent-supervisor.onrender.com/v1/evaluate
+```
+
+This runs 5 queries concurrently and returns routing paths, latency, token usage, and cost for each. See [`EVAL.md`](./EVAL.md) for full analysis of routing behaviour, failure modes, and optimisation decisions.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| LLM | Llama-3.3-70b-versatile via Groq API |
+| Orchestration | LangGraph (StateGraph, conditional edges) |
+| API Framework | FastAPI + Uvicorn |
+| Token Counting | tiktoken (cl100k_base) |
+| Tools | DuckDuckGo Search, Wikipedia, ArXiv, Python REPL |
+| Deployment | Render (Procfile-based, ephemeral-safe) |
+
+---
+
+## Repository Structure
+
+```
+├── main.py          # FastAPI app — endpoints, WebSocket, evaluate
+├── graph.py         # LangGraph supervisor + all agent definitions
+├── requirements.txt # Dependencies
+├── EVAL.md          # Stress test analysis, routing decisions, failure modes
+├── debate_proof.json # Raw state dump from a live Debate Protocol cycle
+├── Procfile         # Render deployment config
+└── traces/          # Session trace files (when PERSIST_TRACES=true)
+```
+
+---
+
+*Built by Indrajith MP as part of the Wubble.ai Agentic AI Systems internship assessment.*
