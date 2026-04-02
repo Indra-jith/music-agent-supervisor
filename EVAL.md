@@ -45,7 +45,20 @@ The `/v1/evaluate` endpoint executes these queries concurrently. The traces belo
 * **Routing Strategy:** Extended Debate Protocol.
 * **Agents Called:** `["music_researcher", "trend_analyst", "prompt_strategist", "music_researcher", "trend_analyst", "prompt_strategist"]`
 * **Metrics:** Total tokens: ~4,200 | Latency: ~8.2s | Cost: $0.0031
-* **Outcome:** First strategist execution triggered the `contradiction_detected` state. The loop forced the researcher and analyst to defend their metrics. The second strategist execution resolved the tempo discrepancy safely, proving the system self-corrects while staying within the dynamically allocated budget limit.
+* **Outcome:** First strategist execution triggered the `contradiction_detected` state. The loop forced the researcher and analyst to defend their metrics. The second strategist execution resolved the tempo discrepancy safely, proving the system self-corrects while staying within the dynamically allocated budget limit. *(Note: See `debate_proof.json` for the raw state dump from a live contradiction resolution).*
+
+### Query D: "Background music for an 8-hour sleep stories feature in a meditation app"
+* **Classification:** Ambient/Functional.
+* **Routing Strategy:** Broad context sweep prioritizing tone and duration.
+* **Agents Called:** `["music_researcher", "prompt_strategist"]`
+* **Skipped Agents:** `["trend_analyst"]`
+* **Outcome:** Output successfully emphasized droning, non-rhythmic beds, skipping BPM-heavy trend analysis entirely to stay under budget while focusing on mood and duration parameters.
+
+### Query E: "Make it sound cool"
+* **Classification:** Extremely Vague Constraint.
+* **Routing Strategy:** Interrogation and default bridging.
+* **Agents Called:** `["prompt_strategist"]`
+* **Outcome:** Instead of wasting 3000 tokens on Wikipedia searching for the genre "cool", the supervisor correctly identified the vagueness and routed directly to the Strategist, which interpreted it as modern, high-energy pop/electronic per the fallback instruction: "interpret it in the most commercially useful direction".
 
 ---
 

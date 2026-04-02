@@ -9,14 +9,13 @@ Music Agent Supervisor is a non-deterministic, multi-agent AI system designed to
 You can immediately test the live API via `curl`:
 
 ```bash
-curl -X POST https://your-app.onrender.com/v1/execute \
+curl -X POST https://music-agent-supervisor.onrender.com/v1/execute \
   -H "Content-Type: application/json" \
   -d '{"query":"upbeat electronic ad for Nike","token_budget":3000}'
 ```
-*(Note: Replace `your-app.onrender.com` with the actual Render deployment URL.)*
 
-Alternatively, visit the interactive Swagger UI:
-[Live API Documentation](https://your-app.onrender.com/docs)
+Alternatively, visit the interactive Swagger UI and Frontend:
+[Live API Documentation & Sandbox](https://music-agent-supervisor.onrender.com/docs)
 
 ---
 
@@ -66,6 +65,7 @@ In Wubble:
 ## 🌐 Endpoints Overview
 
 - `POST /v1/execute` : Execute a generation query.
+- `GET /v1/health` (and `/health`) : System health check.
 - `GET /v1/trace/{session_id}` : Retrieve specific trace pathways on persistent disk models.
 - `GET /v1/evaluate` : A built-in concurrent suite of 5 stress-tests to test the routing resilience.
 - `WS /ws/execute` : Real-time Streaming WebSocket connection that publishes agent events as they happen for high-fidelity frontends.
